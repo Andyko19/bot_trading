@@ -15,20 +15,21 @@ if (!token || !chatId) {
     process.exit(1);
 }
 
-const bot = new TelegramBot(token, { polling: false });
+const bot = new TelegramBot(token, { polling: true });
 
-// ⚙️ PARÁMETROS GANADORES (Validado en Backtest)
-const SYMBOL = 'BTC/USD';   // El Rey Bitcoin (Estrategia Survivor)
-const TIMEFRAME = '1h';     // Gráfico de 1 Hora
+// ⚙️ PARÁMETROS
+const SYMBOL = 'BTC/USD';   
+const TIMEFRAME = '1h';     
 const CAPITAL_INICIAL = 10000; 
-const RIESGO_POR_OPERACION = 1.0; // 1% ($100 por trade si tienes 10k)
-const LIMITE_PERDIDA_DIARIA = 4.0; // 4% (Protección Anti-Quiebra Fondeo)
+const RIESGO_POR_OPERACION = 1.0; 
+const LIMITE_PERDIDA_DIARIA = 4.0; 
 
-// 💾 MEMORIA PERSISTENTE (Anti-Reinicios Railway)
+// 💾 MEMORIA PERSISTENTE
 const DB_FILE = 'estado_bot.json';
 
 let estadoBot = {
     enPosicion: false,
+    pausadoPorUsuario: false, 
     tipo: 'NINGUNA', 
     precioEntrada: 0,
     stopLoss: 0,
@@ -39,32 +40,66 @@ let estadoBot = {
     diaActual: new Date().toISOString().split('T')[0]
 };
 
-// Cargar memoria al despertar (Si Railway se reinicia)
 function cargarEstado() {
     if (fs.existsSync(DB_FILE)) {
         try {
             const data = fs.readFileSync(DB_FILE, 'utf8');
             const guardado = JSON.parse(data);
             estadoBot = { ...estadoBot, ...guardado };
-            console.log("💾 Memoria restaurada correctamente:", estadoBot);
-        } catch (error) {
-            console.error("⚠️ Error leyendo memoria, iniciando desde cero.");
-        }
+            console.log("💾 Memoria restaurada:", estadoBot);
+        } catch (error) { console.error("⚠️ Error leyendo memoria."); }
     }
 }
 
-// Guardar memoria cada vez que hacemos algo importante
 function guardarEstado() {
     fs.writeFileSync(DB_FILE, JSON.stringify(estadoBot, null, 2));
 }
 
 cargarEstado();
 
-// --- CALCULADORA DE LOTAJE (Gestión de Riesgo) ---
+// --- COMANDOS MANUALES (Respaldo) ---
+bot.onText(/\/pausa/, (msg) => {
+    if (msg.chat.id.toString() !== chatId) return;
+    estadoBot.pausadoPorUsuario = true;
+    guardarEstado();
+    bot.sendMessage(chatId, "🛑 BOT PAUSADO MANUALMENTE.");
+});
+
+bot.onText(/\/reanudar/, (msg) => {
+    if (msg.chat.id.toString() !== chatId) return;
+    estadoBot.pausadoPorUsuario = false;
+    guardarEstado();
+    bot.sendMessage(chatId, "✅ BOT REANUDADO MANUALMENTE.");
+});
+
+bot.onText(/\/estado/, (msg) => {
+    if (msg.chat.id.toString() !== chatId) return;
+    bot.sendMessage(chatId, `🤖 ESTADO: ${estadoBot.enPosicion ? 'EN OPERACIÓN' : 'BUSCANDO'}\nBalance: $${estadoBot.balance.toFixed(2)}`);
+});
+
+// --- FUNCIÓN ANTI-NOTICIAS (AUTO BLOCK) 🛡️ ---
+function esHorarioPeligroso(): boolean {
+    // Obtenemos la hora actual en Nueva York (Wall Street)
+    const ahoraNY = new Date().toLocaleString("en-US", {timeZone: "America/New_York"});
+    const fechaNY = new Date(ahoraNY);
+    const hora = fechaNY.getHours();
+    const minutos = fechaNY.getMinutes();
+
+    // Rango 1: 08:25 AM - 08:45 AM (CPI, NFP, GDP)
+    if (hora === 8 && minutos >= 25 && minutos <= 45) return true;
+
+    // Rango 2: 13:55 PM - 14:15 PM (1:55 - 2:15 PM) (FOMC, FED)
+    // Nota: 13:55 es 1:55 PM
+    if (hora === 13 && minutos >= 55) return true;
+    if (hora === 14 && minutos <= 15) return true;
+
+    return false;
+}
+
+// --- HERRAMIENTAS ---
 function calcularTamanoPosicion(balance: number, riesgo: number, entrada: number, sl: number): number {
     const distancia = Math.abs(entrada - sl);
     if (distancia === 0) return 0;
-    // Fórmula: Dinero_a_Perder / Distancia_SL
     const dineroArriesgar = balance * (riesgo / 100);
     return dineroArriesgar / distancia;
 }
@@ -73,41 +108,48 @@ async function notificar(msg: string) {
     try { await bot.sendMessage(chatId!, msg); } catch (e) { console.error(e); }
 }
 
-// --- CEREBRO MAESTRO V5.5 (FINAL) ---
+// --- CEREBRO MAESTRO V5.7 ---
 async function analizarMercado() {
-    // Usamos COINBASE para evitar bloqueo en EE.UU. (Railway)
     const exchange = new ccxt.coinbase({ enableRateLimit: true });
     
-    // 1. GESTIÓN DEL DÍA (Reset diario para el Kill Switch)
+    // 1. GESTIÓN DEL DÍA
     const hoy = new Date().toISOString().split('T')[0];
     if (estadoBot.diaActual !== hoy) {
         estadoBot.diaActual = hoy;
         estadoBot.balanceInicioDia = estadoBot.balance;
         guardarEstado();
-        await notificar(`📅 **NUEVO DÍA OPERATIVO**\nBalance Inicio: $${estadoBot.balance.toFixed(2)}\nKill Switch: Reseteado.`);
+        await notificar(`📅 **NUEVO DÍA** | Balance: $${estadoBot.balance.toFixed(2)}`);
     }
 
-    // 2. KILL SWITCH (Protección de Cuenta)
-    const perdidaHoy = estadoBot.balanceInicioDia - estadoBot.balance;
-    const limiteDinero = estadoBot.balanceInicioDia * (LIMITE_PERDIDA_DIARIA / 100);
-
-    // Si hemos perdido más del 4% hoy, APAGAMOS EL CEREBRO hasta mañana
-    if (perdidaHoy >= limiteDinero) {
-        console.log(`🛑 KILL SWITCH ACTIVADO. Pérdida: -$${perdidaHoy.toFixed(2)}`);
+    // 2. FILTROS DE BLOQUEO (Manual + Automático)
+    if (estadoBot.pausadoPorUsuario) {
+        console.log("🛑 Pausado por Usuario.");
         return; 
     }
 
-    console.log(`\n🛡️ V5.5 Analizando ${SYMBOL}...`);
+    if (esHorarioPeligroso()) {
+        console.log("🔥 HORARIO DE NOTICIAS (NY). Bot en modo seguro (Pausa temporal).");
+        // Si no estamos en operación, simplemente no hacemos nada.
+        // Si estuviéramos en operación, dejamos que el SL/TP trabajen (ya están puestos).
+        return; 
+    }
+
+    // 3. KILL SWITCH
+    const perdidaHoy = estadoBot.balanceInicioDia - estadoBot.balance;
+    const limiteDinero = estadoBot.balanceInicioDia * (LIMITE_PERDIDA_DIARIA / 100);
+    if (perdidaHoy >= limiteDinero) {
+        console.log(`🛑 KILL SWITCH ACTIVADO.`);
+        return; 
+    }
+
+    console.log(`\n🛡️ V5.7 Analizando ${SYMBOL}...`);
 
     try {
         const ohlcv = await exchange.fetchOHLCV(SYMBOL, TIMEFRAME, undefined, 300);
         if (!ohlcv || ohlcv.length === 0) return;
 
-        // Limpieza de datos
         const velas = ohlcv.map(v => ({
-            high: v[2] as number,
-            low: v[3] as number,
-            close: v[4] as number
+            high: v[2] as number, low: v[3] as number, close: v[4] as number
         }));
         
         const closes = velas.map(v => v.close);
@@ -115,14 +157,13 @@ async function analizarMercado() {
         const lows = velas.map(v => v.low);
         const precioActual = closes[closes.length - 1]; 
         
-        // --- GESTIÓN DE SALIDAS (SL/TP en tiempo real) ---
+        // --- GESTIÓN SALIDAS ---
         if (estadoBot.enPosicion) {
-            console.log(`⏳ GESTIONANDO ${estadoBot.tipo} | Entrada: ${estadoBot.precioEntrada} | Actual: ${precioActual}`);
-            
+            console.log(`⏳ GESTIONANDO ${estadoBot.tipo} | Actual: ${precioActual}`);
             let cerro = false;
             let resultado = 0;
             let mensaje = "";
-            const velaActual = velas[velas.length - 1]; // Usamos la vela actual para cerrar rápido
+            const velaActual = velas[velas.length - 1]; 
 
             if (estadoBot.tipo === 'LONG') {
                 if (velaActual.low <= estadoBot.stopLoss) {
@@ -152,91 +193,71 @@ async function analizarMercado() {
                 estadoBot.enPosicion = false;
                 estadoBot.tipo = 'NINGUNA';
                 guardarEstado(); 
-                await notificar(`${mensaje}\n💰 Nuevo Balance Simulado: $${estadoBot.balance.toFixed(2)}`);
+                await notificar(`${mensaje}\n💰 Balance: $${estadoBot.balance.toFixed(2)}`);
             }
-            return; // Si estamos dentro, no buscamos nuevas entradas
-        }
-
-        // --- CÁLCULO DE INDICADORES (Sobre Vela CERRADA) ---
-        // Eliminamos la última vela para no caer en trampas de repintado
-        const closesConfirmados = closes.slice(0, -1); 
-        const highsConfirmados = highs.slice(0, -1);
-        const lowsConfirmados = lows.slice(0, -1);
-
-        const sma200Arr = SMA.calculate({ period: 200, values: closesConfirmados });
-        const sma200 = sma200Arr[sma200Arr.length - 1];
-        
-        const rsiArr = RSI.calculate({ period: 14, values: closesConfirmados });
-        const rsi = rsiArr[rsiArr.length - 1];
-        
-        const macdArr = MACD.calculate({ values: closesConfirmados, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, SimpleMAOscillator: false, SimpleMASignal: false });
-        const macdActual = macdArr[macdArr.length - 1];
-        const macdPrevio = macdArr[macdArr.length - 2];
-        
-        const adxInput = { close: closesConfirmados, high: highsConfirmados, low: lowsConfirmados, period: 14 };
-        const adxResult = ADX.calculate(adxInput).pop();
-
-        if (!sma200 || !rsi || !macdActual || !adxResult) return;
-
-        // FILTRO DE CALIDAD (ADX < 25 se ignora)
-        if (adxResult.adx < 25) {
-            console.log(`💤 Mercado Lateral (ADX: ${adxResult.adx.toFixed(1)}). Esperando tendencia...`);
             return; 
         }
 
-        const cruceMacdAlcista = (macdPrevio.MACD! < macdPrevio.signal!) && (macdActual.MACD! > macdActual.signal!);
-        const cruceMacdBajista = (macdPrevio.MACD! > macdPrevio.signal!) && (macdActual.MACD! < macdActual.signal!);
-        
-        // Precio de cierre de la vela CONFIRMADA
-        const precioCierreVelaAnterior = closesConfirmados[closesConfirmados.length-1];
+        // --- INDICADORES ---
+        const closesConf = closes.slice(0, -1); 
+        const highsConf = highs.slice(0, -1);
+        const lowsConf = lows.slice(0, -1);
 
-        // --- ENTRADAS MAESTRAS ---
+        const sma200 = SMA.calculate({ period: 200, values: closesConf }).pop();
+        const rsi = RSI.calculate({ period: 14, values: closesConf }).pop();
+        const macdVal = MACD.calculate({ values: closesConf, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, SimpleMAOscillator: false, SimpleMASignal: false });
+        const macdActual = macdVal[macdVal.length - 1];
+        const macdPrevio = macdVal[macdVal.length - 2];
+        const adxResult = ADX.calculate({ close: closesConf, high: highsConf, low: lowsConf, period: 14 }).pop();
 
-        // LONG (Compra)
-        if (precioCierreVelaAnterior > sma200 && rsi < 70 && cruceMacdAlcista) {
-            const sl = Math.min(...lowsConfirmados.slice(-10)); // SL en el último bajo
-            const tp = precioActual + ((precioActual - sl) * 2); // Ratio 1:2
+        if (!sma200 || !rsi || !macdActual || !adxResult) return;
+
+        if (adxResult.adx < 25) {
+            console.log(`💤 Lateral (ADX: ${adxResult.adx.toFixed(1)})`);
+            return; 
+        }
+
+        const cruceAlcista = (macdPrevio.MACD! < macdPrevio.signal!) && (macdActual.MACD! > macdActual.signal!);
+        const cruceBajista = (macdPrevio.MACD! > macdPrevio.signal!) && (macdActual.MACD! < macdActual.signal!);
+        const cierre = closesConf[closesConf.length-1];
+
+        // --- ENTRADAS ---
+        if (cierre > sma200 && rsi < 70 && cruceAlcista) {
+            const sl = Math.min(...lowsConf.slice(-10)); 
+            const tp = precioActual + ((precioActual - sl) * 2); 
             const lotes = calcularTamanoPosicion(estadoBot.balance, RIESGO_POR_OPERACION, precioActual, sl);
 
             estadoBot = { 
                 enPosicion: true, tipo: 'LONG', precioEntrada: precioActual, 
                 stopLoss: sl, takeProfit: tp, lotes: lotes, balance: estadoBot.balance,
-                balanceInicioDia: estadoBot.balanceInicioDia, diaActual: estadoBot.diaActual
+                balanceInicioDia: estadoBot.balanceInicioDia, diaActual: estadoBot.diaActual,
+                pausadoPorUsuario: false
             };
             guardarEstado();
-
-            const msg = `🚀 COMPRA (LONG)\nPrecio: $${precioActual}\nSL: $${sl}\nTP: $${tp}\nRiesgo: 1% ($${(estadoBot.balance * 0.01).toFixed(0)})\nADX: ${adxResult.adx.toFixed(1)}\n\n✅ Señal Confirmada V5.5`;
-            console.log("🔥 SEÑAL DE COMPRA ENVIADA");
-            await notificar(msg);
+            await notificar(`🚀 COMPRA (LONG)\nPrecio: $${precioActual}\nSL: $${sl}\nTP: $${tp}\nADX: ${adxResult.adx.toFixed(1)}`);
         }
-
-        // SHORT (Venta)
-        else if (precioCierreVelaAnterior < sma200 && rsi > 30 && cruceMacdBajista) {
-            const sl = Math.max(...highsConfirmados.slice(-10)); // SL en el último alto
-            const tp = precioActual - ((sl - precioActual) * 2); // Ratio 1:2
+        else if (cierre < sma200 && rsi > 30 && cruceBajista) {
+            const sl = Math.max(...highsConf.slice(-10)); 
+            const tp = precioActual - ((sl - precioActual) * 2); 
             const lotes = calcularTamanoPosicion(estadoBot.balance, RIESGO_POR_OPERACION, precioActual, sl);
 
             estadoBot = { 
                 enPosicion: true, tipo: 'SHORT', precioEntrada: precioActual, 
                 stopLoss: sl, takeProfit: tp, lotes: lotes, balance: estadoBot.balance,
-                balanceInicioDia: estadoBot.balanceInicioDia, diaActual: estadoBot.diaActual
+                balanceInicioDia: estadoBot.balanceInicioDia, diaActual: estadoBot.diaActual,
+                pausadoPorUsuario: false
             };
             guardarEstado();
-
-            const msg = `📉 VENTA (SHORT)\nPrecio: $${precioActual}\nSL: $${sl}\nTP: $${tp}\nRiesgo: 1% ($${(estadoBot.balance * 0.01).toFixed(0)})\nADX: ${adxResult.adx.toFixed(1)}\n\n✅ Señal Confirmada V5.5`;
-            console.log("🔥 SEÑAL DE VENTA ENVIADA");
-            await notificar(msg);
+            await notificar(`📉 VENTA (SHORT)\nPrecio: $${precioActual}\nSL: $${sl}\nTP: $${tp}\nADX: ${adxResult.adx.toFixed(1)}`);
         } else {
-            console.log(`👀 Vigilando... RSI: ${rsi.toFixed(1)} | ADX: ${adxResult.adx.toFixed(1)}`);
+            console.log(`👀 Vigilando... RSI: ${rsi.toFixed(1)}`);
         }
 
-    } catch (error) {
-        console.error("❌ Error:", error);
-    }
+    } catch (error) { console.error("❌ Error:", error); }
 }
 
 async function startBot() {
-    await notificar(`🛡️ BOT V5.5 FINAL ACTIVO\nModo: Simulación Fondeo\nCuenta: $${CAPITAL_INICIAL}\nEstrategia: BTC Only`);
+    await notificar(`🛡️ BOT V5.7 ACTIVO\n✅ Modo Automático Anti-Noticias (NY Time)\n✅ Comandos Manuales Listos`);
     setInterval(analizarMercado, 60 * 1000); 
 }
 
