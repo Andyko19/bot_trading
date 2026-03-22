@@ -2,8 +2,8 @@ import ccxt from 'ccxt';
 import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
 import { SMA, RSI, MACD, ADX } from 'technicalindicators';
-import fs from 'fs';
 import MetaApi from 'metaapi.cloud-sdk'; 
+import { MongoClient } from 'mongodb'; // 👈 NUEVO: El traductor de MongoDB
 
 // --- CONFIGURACIÓN ---
 dotenv.config();
@@ -23,7 +23,7 @@ const metaApiToken = process.env.META_API_TOKEN;
 const metaApiAccountId = process.env.META_API_ACCOUNT_ID;
 
 if (!metaApiToken || !metaApiAccountId) {
-    console.error("❌ ERROR: Faltan claves de MetaApi en Railway.");
+    console.error("❌ ERROR: Faltan claves de MetaApi.");
     process.exit(1);
 }
 
@@ -37,14 +37,11 @@ async function dispararOrdenMT5(tipo: 'BUY' | 'SELL', lotes: number, sl: number,
         await connection.connect();
         await connection.waitSynchronized();
 
-        // En FTMO, el símbolo de Bitcoin suele ser 'BTCUSD'
         const symbolMT5 = 'BTCUSD'; 
-        
-        // Redondear lotes a 2 decimales para que MT5 lo acepte
         const lotesMT5 = Math.round(lotes * 100) / 100;
-        const lotesFinales = lotesMT5 < 0.01 ? 0.01 : lotesMT5; // Mínimo 0.01
+        const lotesFinales = lotesMT5 < 0.01 ? 0.01 : lotesMT5; 
 
-        console.log(`🚀 Enviando orden a MT5: ${symbolMT5} | Lotes: ${lotesFinales} | SL: ${sl} | TP: ${tp}`);
+        console.log(`🚀 Enviando a MT5: ${symbolMT5} | Lotes: ${lotesFinales} | SL: ${sl} | TP: ${tp}`);
         
         if (tipo === 'BUY') {
             await connection.createMarketBuyOrder(symbolMT5, lotesFinales, sl, tp);
@@ -52,10 +49,10 @@ async function dispararOrdenMT5(tipo: 'BUY' | 'SELL', lotes: number, sl: number,
             await connection.createMarketSellOrder(symbolMT5, lotesFinales, sl, tp);
         }
         
-        console.log(`✅ ¡Orden ${tipo} ejecutada con éxito en FTMO!`);
+        console.log(`✅ ¡Orden ${tipo} ejecutada en FTMO!`);
     } catch (error) {
-        console.error('❌ Error crítico disparando orden en MT5:', error);
-        notificar(`❌ ALERTA: Falló la conexión con FTMO al intentar abrir ${tipo}. Revisa los logs.`);
+        console.error('❌ Error crítico en MT5:', error);
+        notificar(`❌ ALERTA: Falló conexión con FTMO. Revisa logs.`);
     }
 }
 
@@ -66,8 +63,16 @@ const CAPITAL_INICIAL = 10000;
 const RIESGO_POR_OPERACION = 1.0; 
 const LIMITE_PERDIDA_DIARIA = 4.0; 
 
-// 💾 MEMORIA PERSISTENTE
-const DB_FILE = 'estado_bot.json';
+// ☁️ MEMORIA INMORTAL EN LA NUBE (MONGODB)
+const mongoUri = process.env.MONGO_URI;
+
+if (!mongoUri) {
+    console.error("❌ ERROR: Falta MONGO_URI en tu archivo .env");
+    process.exit(1);
+}
+
+const mongoClient = new MongoClient(mongoUri);
+let dbCollection: any;
 
 let estadoBot = {
     enPosicion: false,
@@ -84,22 +89,40 @@ let estadoBot = {
     breakEvenActivado: false 
 };
 
-function cargarEstado() {
-    if (fs.existsSync(DB_FILE)) {
-        try {
-            const data = fs.readFileSync(DB_FILE, 'utf8');
-            const guardado = JSON.parse(data);
-            estadoBot = { ...estadoBot, ...guardado };
-            console.log("💾 Memoria restaurada:", estadoBot);
-        } catch (error) { console.error("⚠️ Error leyendo memoria."); }
+async function conectarBaseDeDatos() {
+    try {
+        await mongoClient.connect();
+        console.log("🟢 Conectado a la bóveda indestructible de MongoDB Atlas");
+        const db = mongoClient.db('TradingBotDB');
+        dbCollection = db.collection('estado_memoria');
+        await cargarEstado();
+    } catch (error) {
+        console.error("❌ Error conectando a MongoDB:", error);
     }
 }
 
-function guardarEstado() {
-    fs.writeFileSync(DB_FILE, JSON.stringify(estadoBot, null, 2));
+async function cargarEstado() {
+    try {
+        const guardado = await dbCollection.findOne({ id: 'bot_v5' });
+        if (guardado) {
+            delete guardado._id; // Limpiamos info interna de Mongo
+            estadoBot = { ...estadoBot, ...guardado };
+            console.log("💾 Memoria restaurada desde la NUBE:", estadoBot);
+        } else {
+            console.log("🌱 Primera vez iniciando, creando memoria en la NUBE...");
+            guardarEstado();
+        }
+    } catch (error) { console.error("⚠️ Error leyendo memoria en la nube."); }
 }
 
-cargarEstado();
+function guardarEstado() {
+    if (!dbCollection) return;
+    dbCollection.updateOne(
+        { id: 'bot_v5' },
+        { $set: estadoBot },
+        { upsert: true } // Si no existe, lo crea
+    ).catch((e:any) => console.error("Error guardando en la nube:", e));
+}
 
 // --- COMANDOS MANUALES ---
 bot.onText(/\/pausa/, (msg) => {
@@ -119,7 +142,7 @@ bot.onText(/\/reanudar/, (msg) => {
 bot.onText(/\/estado/, (msg) => {
     if (msg.chat.id.toString() !== chatId) return;
     const be = estadoBot.breakEvenActivado ? "ACTIVADO 🔒" : "PENDIENTE";
-    bot.sendMessage(chatId, `🤖 ESTADO V5.10\nPosición: ${estadoBot.enPosicion ? estadoBot.tipo : 'BUSCANDO'}\nOps Hoy: ${estadoBot.operacionesHoy}\nCandado (BE): ${be}\nBalance: $${estadoBot.balance.toFixed(2)}`);
+    bot.sendMessage(chatId, `🤖 ESTADO V5.10 (NUBE)\nPosición: ${estadoBot.enPosicion ? estadoBot.tipo : 'BUSCANDO'}\nOps Hoy: ${estadoBot.operacionesHoy}\nCandado (BE): ${be}\nBalance: $${estadoBot.balance.toFixed(2)}`);
 });
 
 // --- FUNCIONES DE SEGURIDAD (HORARIO NY) ---
@@ -131,26 +154,18 @@ function obtenerHoraNY() {
 
 function esHorarioPeligroso(): boolean {
     const { hora, minutos } = obtenerHoraNY();
-
-    // Noticias Mañana (8:25 - 8:45 AM NY)
     if (hora === 8 && minutos >= 25 && minutos <= 45) return true;
-    // Noticias Tarde / FED (1:55 - 2:15 PM NY)
     if (hora === 13 && minutos >= 55) return true;
     if (hora === 14 && minutos <= 15) return true;
-    
     return false;
 }
 
-// --- FUNCIÓN SERENO NOCTURNO (AJUSTADO A CIERRE NY) 🌙 ---
+// --- FUNCIÓN SERENO NOCTURNO 🌙 ---
 function verificarRequisitoDiario(precioActual: number) {
     const { hora, minutos } = obtenerHoraNY();
-
-    // 16:50 NY (4:50 PM) - 10 minutos antes del cierre contable típico
     if (hora === 16 && minutos >= 50) {
         if (estadoBot.operacionesHoy === 0 && !estadoBot.enPosicion) {
-            
-            console.log("🌙 SERENO: Cierre de día NY cerca. Abriendo operación mínima.");
-            
+            console.log("🌙 SERENO: Abriendo operación mínima de asistencia.");
             estadoBot.enPosicion = true;
             estadoBot.tipo = 'ACTIVIDAD'; 
             estadoBot.precioEntrada = precioActual;
@@ -158,9 +173,8 @@ function verificarRequisitoDiario(precioActual: number) {
             estadoBot.takeProfit = precioActual * 1.001;
             estadoBot.lotes = 0.001; 
             estadoBot.breakEvenActivado = false;
-            
             guardarEstado();
-            notificar(`🌙 **OPERACIÓN DE ASISTENCIA (Cierre NY)**\nAbriendo trade mínimo para cumplir requisito diario.`);
+            notificar(`🌙 **OPERACIÓN DE ASISTENCIA (Cierre NY)**\nCumpliendo requisito diario en FTMO.`);
         }
     }
 }
@@ -204,7 +218,6 @@ async function analizarMercado() {
         const ohlcv = await exchange.fetchOHLCV(SYMBOL, TIMEFRAME, undefined, 300);
         if (!ohlcv || ohlcv.length === 0) return;
 
-        // CORRECCIÓN: Extracción correcta de datos OHLCV de CCXT
         const velas = ohlcv.map(v => ({ high: v[2] as number, low: v[3] as number, close: v[4] as number }));
         const closes = velas.map(v => v.close);
         const highs = velas.map(v => v.high);
@@ -229,7 +242,7 @@ async function analizarMercado() {
                     estadoBot.stopLoss = estadoBot.precioEntrada;
                     estadoBot.breakEvenActivado = true;
                     guardarEstado();
-                    await notificar(`🔒 **CANDADO ACTIVADO**\nSL movido a entrada ($${estadoBot.stopLoss}). Riesgo Cero.`);
+                    await notificar(`🔒 **CANDADO ACTIVADO**\nSL a entrada ($${estadoBot.stopLoss}). Riesgo Cero.`);
                 }
             }
 
@@ -240,7 +253,7 @@ async function analizarMercado() {
 
             if (estadoBot.tipo === 'ACTIVIDAD') {
                 resultado = -2.00; 
-                mensaje = `🌙 ACTIVIDAD CUMPLIDA (Cierre NY).`;
+                mensaje = `🌙 ACTIVIDAD CUMPLIDA.`;
                 cerro = true;
             } 
             else {
@@ -301,7 +314,7 @@ async function analizarMercado() {
         const cruceBajista = (macdPrevio.MACD! > macdPrevio.signal!) && (macdActual.MACD! < macdActual.signal!);
         const cierre = closesConf[closesConf.length-1];
 
-        // --- ENTRADAS REALES ---
+        // --- ENTRADAS ---
         if (cierre > sma200 && rsi < 70 && cruceAlcista) {
             const sl = Math.min(...lowsConf.slice(-10)); 
             const tp = precioActual + ((precioActual - sl) * 2); 
@@ -315,10 +328,7 @@ async function analizarMercado() {
             };
             guardarEstado();
             
-            // CORRECCIÓN: Notificación completa sin errores
             await notificar(`🚀 COMPRA (LONG)\nPrecio: $${precioActual}\nSL: $${sl}\nTP: $${tp}\nADX: ${adxResult.adx.toFixed(1)}`);
-            
-            // 👉 DISPARO A FTMO (METAAPI)
             await dispararOrdenMT5('BUY', lotes, sl, tp);
         }
         else if (cierre < sma200 && rsi > 30 && cruceBajista) {
@@ -334,17 +344,15 @@ async function analizarMercado() {
             };
             guardarEstado();
             
-            // CORRECCIÓN: Notificación completa sin errores
             await notificar(`📉 VENTA (SHORT)\nPrecio: $${precioActual}\nSL: $${sl}\nTP: $${tp}\nADX: ${adxResult.adx.toFixed(1)}`);
-            
-            // 👉 DISPARO A FTMO (METAAPI)
             await dispararOrdenMT5('SELL', lotes, sl, tp);
         }
     } catch (error) { console.error("❌ Error:", error); }
 }
 
 async function startBot() {
-    await notificar(`🛡️ BOT V5.10 FINAL ACTIVO\n✅ Conectado a FTMO\n✅ Break Even + Noticias NY\n✅ Sereno Nocturno (16:50 NY)`);
+    await conectarBaseDeDatos(); // 👈 NUEVO: Conecta a la bóveda antes de arrancar
+    await notificar(`🛡️ BOT V5.10 (NUBE) ACTIVO\n✅ Conectado a FTMO\n✅ Memoria MongoDB Inmortal`);
     setInterval(analizarMercado, 60 * 1000); 
 }
 
