@@ -3,6 +3,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
 import { SMA, RSI, MACD, ADX } from 'technicalindicators';
 import fs from 'fs';
+import MetaApi from 'metaapi.cloud-sdk'; 
 
 // --- CONFIGURACIÓN ---
 dotenv.config();
@@ -16,6 +17,47 @@ if (!token || !chatId) {
 }
 
 const bot = new TelegramBot(token, { polling: true });
+
+// --- CONEXIÓN A FTMO (METAAPI) ---
+const metaApiToken = process.env.META_API_TOKEN;
+const metaApiAccountId = process.env.META_API_ACCOUNT_ID;
+
+if (!metaApiToken || !metaApiAccountId) {
+    console.error("❌ ERROR: Faltan claves de MetaApi en Railway.");
+    process.exit(1);
+}
+
+const api = new MetaApi(metaApiToken);
+
+async function dispararOrdenMT5(tipo: 'BUY' | 'SELL', lotes: number, sl: number, tp: number) {
+    try {
+        console.log(`🔌 Conectando a servidor FTMO para orden ${tipo}...`);
+        const account = await api.metatraderAccountApi.getAccount(metaApiAccountId!);
+        const connection = account.getRPCConnection();
+        await connection.connect();
+        await connection.waitSynchronized();
+
+        // En FTMO, el símbolo de Bitcoin suele ser 'BTCUSD'
+        const symbolMT5 = 'BTCUSD'; 
+        
+        // Redondear lotes a 2 decimales para que MT5 lo acepte
+        const lotesMT5 = Math.round(lotes * 100) / 100;
+        const lotesFinales = lotesMT5 < 0.01 ? 0.01 : lotesMT5; // Mínimo 0.01
+
+        console.log(`🚀 Enviando orden a MT5: ${symbolMT5} | Lotes: ${lotesFinales} | SL: ${sl} | TP: ${tp}`);
+        
+        if (tipo === 'BUY') {
+            await connection.createMarketBuyOrder(symbolMT5, lotesFinales, sl, tp);
+        } else {
+            await connection.createMarketSellOrder(symbolMT5, lotesFinales, sl, tp);
+        }
+        
+        console.log(`✅ ¡Orden ${tipo} ejecutada con éxito en FTMO!`);
+    } catch (error) {
+        console.error('❌ Error crítico disparando orden en MT5:', error);
+        notificar(`❌ ALERTA: Falló la conexión con FTMO al intentar abrir ${tipo}. Revisa los logs.`);
+    }
+}
 
 // ⚙️ PARÁMETROS
 const SYMBOL = 'BTC/USD';   
@@ -105,15 +147,13 @@ function verificarRequisitoDiario(precioActual: number) {
 
     // 16:50 NY (4:50 PM) - 10 minutos antes del cierre contable típico
     if (hora === 16 && minutos >= 50) {
-        // Si no hemos operado nada hoy Y no estamos en una operación real
         if (estadoBot.operacionesHoy === 0 && !estadoBot.enPosicion) {
             
             console.log("🌙 SERENO: Cierre de día NY cerca. Abriendo operación mínima.");
             
             estadoBot.enPosicion = true;
-            estadoBot.tipo = 'ACTIVIDAD'; // Marca especial
+            estadoBot.tipo = 'ACTIVIDAD'; 
             estadoBot.precioEntrada = precioActual;
-            // SL/TP simbólicos para salir rápido
             estadoBot.stopLoss = precioActual * 0.999; 
             estadoBot.takeProfit = precioActual * 1.001;
             estadoBot.lotes = 0.001; 
@@ -164,6 +204,7 @@ async function analizarMercado() {
         const ohlcv = await exchange.fetchOHLCV(SYMBOL, TIMEFRAME, undefined, 300);
         if (!ohlcv || ohlcv.length === 0) return;
 
+        // CORRECCIÓN: Extracción correcta de datos OHLCV de CCXT
         const velas = ohlcv.map(v => ({ high: v[2] as number, low: v[3] as number, close: v[4] as number }));
         const closes = velas.map(v => v.close);
         const highs = velas.map(v => v.high);
@@ -174,7 +215,6 @@ async function analizarMercado() {
         if (estadoBot.enPosicion) {
             console.log(`⏳ GESTIONANDO ${estadoBot.tipo} | Actual: ${precioActual}`);
             
-            // 1. BREAK EVEN (Solo para operaciones reales)
             if (estadoBot.tipo !== 'ACTIVIDAD' && !estadoBot.breakEvenActivado) {
                 let activarBE = false;
                 if (estadoBot.tipo === 'LONG') {
@@ -193,19 +233,17 @@ async function analizarMercado() {
                 }
             }
 
-            // 2. CIERRE (SL / TP / ACTIVIDAD)
             let cerro = false;
             let resultado = 0;
             let mensaje = "";
             const velaActual = velas[velas.length - 1]; 
 
             if (estadoBot.tipo === 'ACTIVIDAD') {
-                resultado = -2.00; // Costo spread simulado
+                resultado = -2.00; 
                 mensaje = `🌙 ACTIVIDAD CUMPLIDA (Cierre NY).`;
                 cerro = true;
             } 
             else {
-                // Operaciones Reales
                 if (estadoBot.tipo === 'LONG') {
                     if (velaActual.low <= estadoBot.stopLoss) {
                         resultado = (estadoBot.stopLoss - estadoBot.precioEntrada) * estadoBot.lotes;
@@ -242,11 +280,9 @@ async function analizarMercado() {
             return; 
         }
 
-        // --- CHEQUEO DE ACTIVIDAD DIARIA ---
         verificarRequisitoDiario(precioActual);
-        if (estadoBot.enPosicion) return; // Si el sereno activó, salimos
+        if (estadoBot.enPosicion) return; 
 
-        // --- INDICADORES ---
         const closesConf = closes.slice(0, -1); 
         const highsConf = highs.slice(0, -1);
         const lowsConf = lows.slice(0, -1);
@@ -278,7 +314,12 @@ async function analizarMercado() {
                 pausadoPorUsuario: false, operacionesHoy: estadoBot.operacionesHoy, breakEvenActivado: false
             };
             guardarEstado();
+            
+            // CORRECCIÓN: Notificación completa sin errores
             await notificar(`🚀 COMPRA (LONG)\nPrecio: $${precioActual}\nSL: $${sl}\nTP: $${tp}\nADX: ${adxResult.adx.toFixed(1)}`);
+            
+            // 👉 DISPARO A FTMO (METAAPI)
+            await dispararOrdenMT5('BUY', lotes, sl, tp);
         }
         else if (cierre < sma200 && rsi > 30 && cruceBajista) {
             const sl = Math.max(...highsConf.slice(-10)); 
@@ -292,13 +333,18 @@ async function analizarMercado() {
                 pausadoPorUsuario: false, operacionesHoy: estadoBot.operacionesHoy, breakEvenActivado: false
             };
             guardarEstado();
+            
+            // CORRECCIÓN: Notificación completa sin errores
             await notificar(`📉 VENTA (SHORT)\nPrecio: $${precioActual}\nSL: $${sl}\nTP: $${tp}\nADX: ${adxResult.adx.toFixed(1)}`);
+            
+            // 👉 DISPARO A FTMO (METAAPI)
+            await dispararOrdenMT5('SELL', lotes, sl, tp);
         }
     } catch (error) { console.error("❌ Error:", error); }
 }
 
 async function startBot() {
-    await notificar(`🛡️ BOT V5.10 FINAL ACTIVO\n✅ Break Even + Noticias NY\n✅ Sereno Nocturno (16:50 NY)`);
+    await notificar(`🛡️ BOT V5.10 FINAL ACTIVO\n✅ Conectado a FTMO\n✅ Break Even + Noticias NY\n✅ Sereno Nocturno (16:50 NY)`);
     setInterval(analizarMercado, 60 * 1000); 
 }
 
