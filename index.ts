@@ -58,7 +58,7 @@ let estadoBot = {
     balance: CAPITAL_INICIAL,
     balanceInicioDia: CAPITAL_INICIAL,
     // ¡AQUÍ ESTÁ EL PRIMER CORREGIDO!
-    diaActual: new Date().toISOString().split('T'),
+    diaActual: new Date().toISOString().split('T') [0],
     operacionesHoy: 0,
     breakEvenActivado: false 
 };
@@ -211,7 +211,7 @@ async function analizarMercado() {
     
     // GESTIÓN DEL DÍA
     // ¡AQUÍ ESTÁ EL SEGUNDO CORREGIDO!
-    const hoy = new Date().toISOString().split('T');
+    const hoy = new Date().toISOString().split('T')[0];
     if (estadoBot.diaActual !== hoy) {
         estadoBot.diaActual = hoy;
         await sincronizarSaldoFTMO(); // Sincroniza apenas empieza el día
@@ -234,7 +234,11 @@ async function analizarMercado() {
 
         // LA CORRECCIÓN DE TYPESCRIPT
         // ¡AQUÍ ESTÁN LOS NÚMEROS DE LAS VELAS CORREGIDOS!
-        const velas = ohlcv.map(v => ({ high: Number(v), low: Number(v), close: Number(v) }));
+        const velas = ohlcv.map(v => ({
+    high: Number(v[2]),
+    low: Number(v[3]),
+    close: Number(v[4])
+}));
         
         const closes = velas.map(v => v.close);
         const highs = velas.map(v => v.high);
