@@ -235,7 +235,7 @@ async function analizarMercado() {
         
         const closes = velas.map(v => v.close);
         const highs = velas.map(v => v.high);
-        const lows = velas.map(v => v.low);
+        const lows = velas.map(v => v.low); 
         const precioActual = closes[closes.length - 1]; 
 
         // --- GESTIÓN SALIDAS ---
