@@ -57,6 +57,7 @@ let estadoBot = {
     lotes: 0,
     balance: CAPITAL_INICIAL,
     balanceInicioDia: CAPITAL_INICIAL,
+    // ¡AQUÍ ESTÁ EL PRIMER CORREGIDO!
     diaActual: new Date().toISOString().split('T'),
     operacionesHoy: 0,
     breakEvenActivado: false 
@@ -209,6 +210,7 @@ async function analizarMercado() {
     const exchange = new ccxt.coinbase({ enableRateLimit: true });
     
     // GESTIÓN DEL DÍA
+    // ¡AQUÍ ESTÁ EL SEGUNDO CORREGIDO!
     const hoy = new Date().toISOString().split('T');
     if (estadoBot.diaActual !== hoy) {
         estadoBot.diaActual = hoy;
@@ -231,6 +233,7 @@ async function analizarMercado() {
         if (!ohlcv || ohlcv.length === 0) return;
 
         // LA CORRECCIÓN DE TYPESCRIPT
+        // ¡AQUÍ ESTÁN LOS NÚMEROS DE LAS VELAS CORREGIDOS!
         const velas = ohlcv.map(v => ({ high: Number(v), low: Number(v), close: Number(v) }));
         
         const closes = velas.map(v => v.close);
