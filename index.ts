@@ -3,7 +3,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
 import { SMA, RSI, MACD, ADX } from 'technicalindicators';
 import MetaApi from 'metaapi.cloud-sdk'; 
-import { MongoClient } from 'mongodb'; // 👈 NUEVO: El traductor de MongoDB
+import { MongoClient } from 'mongodb'; 
 
 // --- CONFIGURACIÓN ---
 dotenv.config();
@@ -28,33 +28,6 @@ if (!metaApiToken || !metaApiAccountId) {
 }
 
 const api = new MetaApi(metaApiToken);
-
-async function dispararOrdenMT5(tipo: 'BUY' | 'SELL', lotes: number, sl: number, tp: number) {
-    try {
-        console.log(`🔌 Conectando a servidor FTMO para orden ${tipo}...`);
-        const account = await api.metatraderAccountApi.getAccount(metaApiAccountId!);
-        const connection = account.getRPCConnection();
-        await connection.connect();
-        await connection.waitSynchronized();
-
-        const symbolMT5 = 'BTCUSD'; 
-        const lotesMT5 = Math.round(lotes * 100) / 100;
-        const lotesFinales = lotesMT5 < 0.01 ? 0.01 : lotesMT5; 
-
-        console.log(`🚀 Enviando a MT5: ${symbolMT5} | Lotes: ${lotesFinales} | SL: ${sl} | TP: ${tp}`);
-        
-        if (tipo === 'BUY') {
-            await connection.createMarketBuyOrder(symbolMT5, lotesFinales, sl, tp);
-        } else {
-            await connection.createMarketSellOrder(symbolMT5, lotesFinales, sl, tp);
-        }
-        
-        console.log(`✅ ¡Orden ${tipo} ejecutada en FTMO!`);
-    } catch (error) {
-        console.error('❌ Error crítico en MT5:', error);
-        notificar(`❌ ALERTA: Falló conexión con FTMO. Revisa logs.`);
-    }
-}
 
 // ⚙️ PARÁMETROS
 const SYMBOL = 'BTC/USD';   
@@ -84,7 +57,7 @@ let estadoBot = {
     lotes: 0,
     balance: CAPITAL_INICIAL,
     balanceInicioDia: CAPITAL_INICIAL,
-    diaActual: new Date().toISOString().split('T')[0],
+    diaActual: new Date().toISOString().split('T'),
     operacionesHoy: 0,
     breakEvenActivado: false 
 };
@@ -92,7 +65,7 @@ let estadoBot = {
 async function conectarBaseDeDatos() {
     try {
         await mongoClient.connect();
-        console.log("🟢 Conectado a la bóveda indestructible de MongoDB Atlas");
+        console.log("🟢 Conectado a MongoDB Atlas");
         const db = mongoClient.db('TradingBotDB');
         dbCollection = db.collection('estado_memoria');
         await cargarEstado();
@@ -105,11 +78,10 @@ async function cargarEstado() {
     try {
         const guardado = await dbCollection.findOne({ id: 'bot_v5' });
         if (guardado) {
-            delete guardado._id; // Limpiamos info interna de Mongo
+            delete guardado._id; 
             estadoBot = { ...estadoBot, ...guardado };
-            console.log("💾 Memoria restaurada desde la NUBE:", estadoBot);
+            console.log("💾 Memoria restaurada desde la NUBE.");
         } else {
-            console.log("🌱 Primera vez iniciando, creando memoria en la NUBE...");
             guardarEstado();
         }
     } catch (error) { console.error("⚠️ Error leyendo memoria en la nube."); }
@@ -120,32 +92,77 @@ function guardarEstado() {
     dbCollection.updateOne(
         { id: 'bot_v5' },
         { $set: estadoBot },
-        { upsert: true } // Si no existe, lo crea
+        { upsert: true } 
     ).catch((e:any) => console.error("Error guardando en la nube:", e));
 }
 
-// --- COMANDOS MANUALES ---
-bot.onText(/\/pausa/, (msg) => {
-    if (msg.chat.id.toString() !== chatId) return;
-    estadoBot.pausadoPorUsuario = true;
-    guardarEstado();
-    bot.sendMessage(chatId, "🛑 BOT PAUSADO MANUALMENTE.");
-});
+// 🔄 NUEVO: SINCRONIZADOR DE SALDO REAL FTMO
+async function sincronizarSaldoFTMO() {
+    try {
+        const account = await api.metatraderAccountApi.getAccount(metaApiAccountId!);
+        const connection = account.getRPCConnection();
+        await connection.connect();
+        await connection.waitSynchronized();
+        const info = await connection.getAccountInformation();
+        
+        if (info && info.balance) {
+            estadoBot.balance = info.balance;
+            guardarEstado();
+            console.log(`🔄 Saldo sincronizado con FTMO: $${estadoBot.balance.toFixed(2)}`);
+        }
+    } catch (error) {
+        console.error("❌ Error sincronizando saldo con FTMO:", error);
+    }
+}
 
-bot.onText(/\/reanudar/, (msg) => {
-    if (msg.chat.id.toString() !== chatId) return;
-    estadoBot.pausadoPorUsuario = false;
-    guardarEstado();
-    bot.sendMessage(chatId, "✅ BOT REANUDADO MANUALMENTE.");
-});
+async function dispararOrdenMT5(tipo: 'BUY' | 'SELL', lotes: number, sl: number, tp: number) {
+    try {
+        const account = await api.metatraderAccountApi.getAccount(metaApiAccountId!);
+        const connection = account.getRPCConnection();
+        await connection.connect();
+        await connection.waitSynchronized();
 
-bot.onText(/\/estado/, (msg) => {
-    if (msg.chat.id.toString() !== chatId) return;
-    const be = estadoBot.breakEvenActivado ? "ACTIVADO 🔒" : "PENDIENTE";
-    bot.sendMessage(chatId, `🤖 ESTADO V5.10 (NUBE)\nPosición: ${estadoBot.enPosicion ? estadoBot.tipo : 'BUSCANDO'}\nOps Hoy: ${estadoBot.operacionesHoy}\nCandado (BE): ${be}\nBalance: $${estadoBot.balance.toFixed(2)}`);
-});
+        const symbolMT5 = 'BTCUSD'; 
+        const lotesMT5 = Math.round(lotes * 100) / 100;
+        const lotesFinales = lotesMT5 < 0.01 ? 0.01 : lotesMT5; 
+        
+        if (tipo === 'BUY') {
+            await connection.createMarketBuyOrder(symbolMT5, lotesFinales, sl, tp);
+        } else {
+            await connection.createMarketSellOrder(symbolMT5, lotesFinales, sl, tp);
+        }
+        console.log(`✅ ¡Orden ${tipo} ejecutada en FTMO!`);
+    } catch (error) {
+        console.error('❌ Error crítico en MT5:', error);
+        notificar(`❌ ALERTA: Falló conexión con FTMO.`);
+    }
+}
 
-// --- FUNCIONES DE SEGURIDAD (HORARIO NY) ---
+// 🌙 NUEVO: GATILLO FÍSICO SERENO NOCTURNO
+async function ejecutarSerenoFisico() {
+    try {
+        const account = await api.metatraderAccountApi.getAccount(metaApiAccountId!);
+        const connection = account.getRPCConnection();
+        await connection.connect();
+        await connection.waitSynchronized();
+
+        console.log(`🌙 SERENO: Abriendo operación mínima en FTMO...`);
+        const order = await connection.createMarketBuyOrder('BTCUSD', 0.01, 0, 0);
+        
+        console.log(`⏳ Orden abierta. Esperando 5 segundos para cerrar...`);
+        await new Promise(r => setTimeout(r, 5000)); // Espera 5 segundos
+        
+        await connection.closePosition(order.positionId, {});
+        console.log(`✅ SERENO COMPLETADO: Orden cerrada físicamente.`);
+        
+        await sincronizarSaldoFTMO(); // Actualiza restando los centavos de comisión
+        await notificar(`🌙 **SERENO NOCTURNO EJECUTADO**\nDía de trading registrado oficialmente en FTMO.\n💰 Nuevo Saldo: $${estadoBot.balance.toFixed(2)}`);
+    } catch (error) {
+        console.error("❌ Error en Sereno Físico:", error);
+        notificar(`❌ ALERTA: Falló el Sereno Nocturno en FTMO.`);
+    }
+}
+
 function obtenerHoraNY() {
     const ahoraNY = new Date().toLocaleString("en-US", {timeZone: "America/New_York"});
     const fechaNY = new Date(ahoraNY);
@@ -160,26 +177,18 @@ function esHorarioPeligroso(): boolean {
     return false;
 }
 
-// --- FUNCIÓN SERENO NOCTURNO 🌙 ---
-function verificarRequisitoDiario(precioActual: number) {
+function verificarRequisitoDiario() {
     const { hora, minutos } = obtenerHoraNY();
+    // Ejecutar a las 4:50 PM NY (Justo antes de que cierre el día en FTMO)
     if (hora === 16 && minutos >= 50) {
         if (estadoBot.operacionesHoy === 0 && !estadoBot.enPosicion) {
-            console.log("🌙 SERENO: Abriendo operación mínima de asistencia.");
-            estadoBot.enPosicion = true;
-            estadoBot.tipo = 'ACTIVIDAD'; 
-            estadoBot.precioEntrada = precioActual;
-            estadoBot.stopLoss = precioActual * 0.999; 
-            estadoBot.takeProfit = precioActual * 1.001;
-            estadoBot.lotes = 0.001; 
-            estadoBot.breakEvenActivado = false;
+            estadoBot.operacionesHoy++; // Lo marcamos inmediatamente para evitar duplicados
             guardarEstado();
-            notificar(`🌙 **OPERACIÓN DE ASISTENCIA (Cierre NY)**\nCumpliendo requisito diario en FTMO.`);
+            ejecutarSerenoFisico(); // Dispara la orden real de 5 segundos
         }
     }
 }
 
-// --- HERRAMIENTAS ---
 function calcularTamanoPosicion(balance: number, riesgo: number, entrada: number, sl: number): number {
     const distancia = Math.abs(entrada - sl);
     if (distancia === 0) return 0;
@@ -191,34 +200,39 @@ async function notificar(msg: string) {
     try { await bot.sendMessage(chatId!, msg); } catch (e) { console.error(e); }
 }
 
-// --- CEREBRO MAESTRO V5.10 ---
+bot.onText(/\/estado/, (msg) => {
+    if (msg.chat.id.toString() !== chatId) return;
+    bot.sendMessage(chatId, `🤖 ESTADO V5.11 (Sincronizado)\nPosición: ${estadoBot.enPosicion ? estadoBot.tipo : 'BUSCANDO'}\nOps Hoy: ${estadoBot.operacionesHoy}\nBalance Real: $${estadoBot.balance.toFixed(2)}`);
+});
+
 async function analizarMercado() {
     const exchange = new ccxt.coinbase({ enableRateLimit: true });
     
     // GESTIÓN DEL DÍA
-    const hoy = new Date().toISOString().split('T')[0];
+    const hoy = new Date().toISOString().split('T');
     if (estadoBot.diaActual !== hoy) {
         estadoBot.diaActual = hoy;
+        await sincronizarSaldoFTMO(); // Sincroniza apenas empieza el día
         estadoBot.balanceInicioDia = estadoBot.balance;
         estadoBot.operacionesHoy = 0; 
         guardarEstado();
-        await notificar(`📅 **NUEVO DÍA** | Balance: $${estadoBot.balance.toFixed(2)}`);
+        await notificar(`📅 **NUEVO DÍA** | Saldo Sincronizado FTMO: $${estadoBot.balance.toFixed(2)}`);
     }
 
     if (estadoBot.pausadoPorUsuario) return;
-    if (esHorarioPeligroso()) { console.log("🔥 HORARIO NOTICIAS (NY)."); return; }
+    if (esHorarioPeligroso()) return;
 
     const perdidaHoy = estadoBot.balanceInicioDia - estadoBot.balance;
     const limiteDinero = estadoBot.balanceInicioDia * (LIMITE_PERDIDA_DIARIA / 100);
-    if (perdidaHoy >= limiteDinero) { console.log(`🛑 KILL SWITCH ACTIVADO.`); return; }
-
-    console.log(`\n🛡️ V5.10 Analizando ${SYMBOL}...`);
+    if (perdidaHoy >= limiteDinero) return;
 
     try {
         const ohlcv = await exchange.fetchOHLCV(SYMBOL, TIMEFRAME, undefined, 300);
         if (!ohlcv || ohlcv.length === 0) return;
 
-        const velas = ohlcv.map(v => ({ high: v[2] as number, low: v[3] as number, close: v[4] as number }));
+        // LA CORRECCIÓN DE TYPESCRIPT
+        const velas = ohlcv.map(v => ({ high: Number(v), low: Number(v), close: Number(v) }));
+        
         const closes = velas.map(v => v.close);
         const highs = velas.map(v => v.high);
         const lows = velas.map(v => v.low);
@@ -226,9 +240,8 @@ async function analizarMercado() {
 
         // --- GESTIÓN SALIDAS ---
         if (estadoBot.enPosicion) {
-            console.log(`⏳ GESTIONANDO ${estadoBot.tipo} | Actual: ${precioActual}`);
             
-            if (estadoBot.tipo !== 'ACTIVIDAD' && !estadoBot.breakEvenActivado) {
+            if (!estadoBot.breakEvenActivado) {
                 let activarBE = false;
                 if (estadoBot.tipo === 'LONG') {
                     const meta = estadoBot.takeProfit - estadoBot.precioEntrada;
@@ -247,53 +260,31 @@ async function analizarMercado() {
             }
 
             let cerro = false;
-            let resultado = 0;
             let mensaje = "";
             const velaActual = velas[velas.length - 1]; 
 
-            if (estadoBot.tipo === 'ACTIVIDAD') {
-                resultado = -2.00; 
-                mensaje = `🌙 ACTIVIDAD CUMPLIDA.`;
-                cerro = true;
+            if (estadoBot.tipo === 'LONG') {
+                if (velaActual.low <= estadoBot.stopLoss) { mensaje = `❌ CIERRE LONG (Stop Loss)`; cerro = true; } 
+                else if (velaActual.high >= estadoBot.takeProfit) { mensaje = `✅ TAKE PROFIT (LONG)`; cerro = true; }
             } 
-            else {
-                if (estadoBot.tipo === 'LONG') {
-                    if (velaActual.low <= estadoBot.stopLoss) {
-                        resultado = (estadoBot.stopLoss - estadoBot.precioEntrada) * estadoBot.lotes;
-                        mensaje = `❌ CIERRE LONG\nResultado: $${resultado.toFixed(2)}`;
-                        cerro = true;
-                    } else if (velaActual.high >= estadoBot.takeProfit) {
-                        resultado = (estadoBot.takeProfit - estadoBot.precioEntrada) * estadoBot.lotes;
-                        mensaje = `✅ TAKE PROFIT (LONG)\nGanancia: +$${resultado.toFixed(2)}`;
-                        cerro = true;
-                    }
-                } 
-                else if (estadoBot.tipo === 'SHORT') {
-                    if (velaActual.high >= estadoBot.stopLoss) {
-                        resultado = (estadoBot.precioEntrada - estadoBot.stopLoss) * estadoBot.lotes;
-                        mensaje = `❌ CIERRE SHORT\nResultado: $${resultado.toFixed(2)}`;
-                        cerro = true;
-                    } else if (velaActual.low <= estadoBot.takeProfit) {
-                        resultado = (estadoBot.precioEntrada - estadoBot.takeProfit) * estadoBot.lotes;
-                        mensaje = `✅ TAKE PROFIT (SHORT)\nGanancia: +$${resultado.toFixed(2)}`;
-                        cerro = true;
-                    }
-                }
+            else if (estadoBot.tipo === 'SHORT') {
+                if (velaActual.high >= estadoBot.stopLoss) { mensaje = `❌ CIERRE SHORT (Stop Loss)`; cerro = true; } 
+                else if (velaActual.low <= estadoBot.takeProfit) { mensaje = `✅ TAKE PROFIT (SHORT)`; cerro = true; }
             }
 
             if (cerro) {
-                estadoBot.balance += resultado;
                 estadoBot.enPosicion = false;
                 estadoBot.tipo = 'NINGUNA';
                 estadoBot.breakEvenActivado = false;
                 estadoBot.operacionesHoy++; 
+                await sincronizarSaldoFTMO(); // Lee el saldo exacto después de cerrar
                 guardarEstado(); 
-                await notificar(`${mensaje}\n💰 Balance: $${estadoBot.balance.toFixed(2)}`);
+                await notificar(`${mensaje}\n💰 Saldo Actualizado FTMO: $${estadoBot.balance.toFixed(2)}`);
             }
             return; 
         }
 
-        verificarRequisitoDiario(precioActual);
+        verificarRequisitoDiario();
         if (estadoBot.enPosicion) return; 
 
         const closesConf = closes.slice(0, -1); 
@@ -308,7 +299,7 @@ async function analizarMercado() {
         const adxResult = ADX.calculate({ close: closesConf, high: highsConf, low: lowsConf, period: 14 }).pop();
 
         if (!sma200 || !rsi || !macdActual || !adxResult) return;
-        if (adxResult.adx < 25) { console.log(`💤 Lateral (ADX: ${adxResult.adx.toFixed(1)})`); return; }
+        if (adxResult.adx < 25) return;
 
         const cruceAlcista = (macdPrevio.MACD! < macdPrevio.signal!) && (macdActual.MACD! > macdActual.signal!);
         const cruceBajista = (macdPrevio.MACD! > macdPrevio.signal!) && (macdActual.MACD! < macdActual.signal!);
@@ -316,43 +307,38 @@ async function analizarMercado() {
 
         // --- ENTRADAS ---
         if (cierre > sma200 && rsi < 70 && cruceAlcista) {
+            await sincronizarSaldoFTMO(); // Sincroniza antes de arriesgar dinero
             const sl = Math.min(...lowsConf.slice(-10)); 
             const tp = precioActual + ((precioActual - sl) * 2); 
             const lotes = calcularTamanoPosicion(estadoBot.balance, RIESGO_POR_OPERACION, precioActual, sl);
 
-            estadoBot = { 
-                enPosicion: true, tipo: 'LONG', precioEntrada: precioActual, 
-                stopLoss: sl, takeProfit: tp, lotes: lotes, balance: estadoBot.balance,
-                balanceInicioDia: estadoBot.balanceInicioDia, diaActual: estadoBot.diaActual,
-                pausadoPorUsuario: false, operacionesHoy: estadoBot.operacionesHoy, breakEvenActivado: false
-            };
+            estadoBot.enPosicion = true; estadoBot.tipo = 'LONG'; estadoBot.precioEntrada = precioActual; 
+            estadoBot.stopLoss = sl; estadoBot.takeProfit = tp; estadoBot.lotes = lotes; estadoBot.breakEvenActivado = false;
             guardarEstado();
             
-            await notificar(`🚀 COMPRA (LONG)\nPrecio: $${precioActual}\nSL: $${sl}\nTP: $${tp}\nADX: ${adxResult.adx.toFixed(1)}`);
+            await notificar(`🚀 COMPRA (LONG)\nPrecio: $${precioActual}\nSL: $${sl}\nTP: $${tp}`);
             await dispararOrdenMT5('BUY', lotes, sl, tp);
         }
         else if (cierre < sma200 && rsi > 30 && cruceBajista) {
+            await sincronizarSaldoFTMO(); // Sincroniza antes de arriesgar dinero
             const sl = Math.max(...highsConf.slice(-10)); 
             const tp = precioActual - ((sl - precioActual) * 2); 
             const lotes = calcularTamanoPosicion(estadoBot.balance, RIESGO_POR_OPERACION, precioActual, sl);
 
-            estadoBot = { 
-                enPosicion: true, tipo: 'SHORT', precioEntrada: precioActual, 
-                stopLoss: sl, takeProfit: tp, lotes: lotes, balance: estadoBot.balance,
-                balanceInicioDia: estadoBot.balanceInicioDia, diaActual: estadoBot.diaActual,
-                pausadoPorUsuario: false, operacionesHoy: estadoBot.operacionesHoy, breakEvenActivado: false
-            };
+            estadoBot.enPosicion = true; estadoBot.tipo = 'SHORT'; estadoBot.precioEntrada = precioActual; 
+            estadoBot.stopLoss = sl; estadoBot.takeProfit = tp; estadoBot.lotes = lotes; estadoBot.breakEvenActivado = false;
             guardarEstado();
             
-            await notificar(`📉 VENTA (SHORT)\nPrecio: $${precioActual}\nSL: $${sl}\nTP: $${tp}\nADX: ${adxResult.adx.toFixed(1)}`);
+            await notificar(`📉 VENTA (SHORT)\nPrecio: $${precioActual}\nSL: $${sl}\nTP: $${tp}`);
             await dispararOrdenMT5('SELL', lotes, sl, tp);
         }
-    } catch (error) { console.error("❌ Error:", error); }
+    } catch (error) { console.error("❌ Error en análisis:", error); }
 }
 
 async function startBot() {
-    await conectarBaseDeDatos(); // 👈 NUEVO: Conecta a la bóveda antes de arrancar
-    await notificar(`🛡️ BOT V5.10 (NUBE) ACTIVO\n✅ Conectado a FTMO\n✅ Memoria MongoDB Inmortal`);
+    await conectarBaseDeDatos(); 
+    await sincronizarSaldoFTMO(); // Sincronización inicial al arrancar
+    await notificar(`🛡️ BOT V5.11 (SINCRONIZADO) ACTIVO\n✅ Días mínimos garantizados\n💰 Saldo Inicial: $${estadoBot.balance.toFixed(2)}`);
     setInterval(analizarMercado, 60 * 1000); 
 }
 
