@@ -206,10 +206,7 @@ bot.onText(/\/estado/, (msg) => {
 
 async function analizarMercado() {
     // --- CORRECCIÓN CLAVE: CAMBIO A BINANCE Y AUMENTO DE TIMEOUT ---
-    const exchange = new ccxt.binance({ 
-        enableRateLimit: true,
-        timeout: 30000 // 30 segundos para evitar RequestTimeout en Railway
-    });
+    const exchange = new ccxt.bybit({ enableRateLimit: true, timeout: 30000 });
     
     const hoy = new Date().toISOString().split('T');
     if (estadoBot.diaActual !== hoy) {
