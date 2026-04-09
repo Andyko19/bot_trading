@@ -30,7 +30,7 @@ if (!metaApiToken || !metaApiAccountId) {
 const api = new MetaApi(metaApiToken);
 
 // ⚙️ PARÁMETROS
-const SYMBOL = 'BTC/USD';   
+const SYMBOL = 'BTC/USDT';   // Cambiado a USDT para compatibilidad con Binance
 const TIMEFRAME = '1h';     
 const CAPITAL_INICIAL = 10000; 
 const RIESGO_POR_OPERACION = 1.0; 
@@ -57,8 +57,7 @@ let estadoBot = {
     lotes: 0,
     balance: CAPITAL_INICIAL,
     balanceInicioDia: CAPITAL_INICIAL,
-    // ¡AQUÍ ESTÁ EL PRIMER CORREGIDO!
-    diaActual: new Date().toISOString().split('T') [0],
+    diaActual: new Date().toISOString().split('T'),
     operacionesHoy: 0,
     breakEvenActivado: false 
 };
@@ -97,7 +96,7 @@ function guardarEstado() {
     ).catch((e:any) => console.error("Error guardando en la nube:", e));
 }
 
-// 🔄 NUEVO: SINCRONIZADOR DE SALDO REAL FTMO
+// 🔄 SINCRONIZADOR DE SALDO REAL FTMO
 async function sincronizarSaldoFTMO() {
     try {
         const account = await api.metatraderAccountApi.getAccount(metaApiAccountId!);
@@ -139,7 +138,7 @@ async function dispararOrdenMT5(tipo: 'BUY' | 'SELL', lotes: number, sl: number,
     }
 }
 
-// 🌙 NUEVO: GATILLO FÍSICO SERENO NOCTURNO
+// 🌙 GATILLO FÍSICO SERENO NOCTURNO
 async function ejecutarSerenoFisico() {
     try {
         const account = await api.metatraderAccountApi.getAccount(metaApiAccountId!);
@@ -151,12 +150,12 @@ async function ejecutarSerenoFisico() {
         const order = await connection.createMarketBuyOrder('BTCUSD', 0.01, 0, 0);
         
         console.log(`⏳ Orden abierta. Esperando 5 segundos para cerrar...`);
-        await new Promise(r => setTimeout(r, 5000)); // Espera 5 segundos
+        await new Promise(r => setTimeout(r, 5000)); 
         
         await connection.closePosition(order.positionId, {});
         console.log(`✅ SERENO COMPLETADO: Orden cerrada físicamente.`);
         
-        await sincronizarSaldoFTMO(); // Actualiza restando los centavos de comisión
+        await sincronizarSaldoFTMO(); 
         await notificar(`🌙 **SERENO NOCTURNO EJECUTADO**\nDía de trading registrado oficialmente en FTMO.\n💰 Nuevo Saldo: $${estadoBot.balance.toFixed(2)}`);
     } catch (error) {
         console.error("❌ Error en Sereno Físico:", error);
@@ -180,12 +179,11 @@ function esHorarioPeligroso(): boolean {
 
 function verificarRequisitoDiario() {
     const { hora, minutos } = obtenerHoraNY();
-    // Ejecutar a las 4:50 PM NY (Justo antes de que cierre el día en FTMO)
     if (hora === 16 && minutos >= 50) {
         if (estadoBot.operacionesHoy === 0 && !estadoBot.enPosicion) {
-            estadoBot.operacionesHoy++; // Lo marcamos inmediatamente para evitar duplicados
+            estadoBot.operacionesHoy++; 
             guardarEstado();
-            ejecutarSerenoFisico(); // Dispara la orden real de 5 segundos
+            ejecutarSerenoFisico(); 
         }
     }
 }
@@ -207,14 +205,16 @@ bot.onText(/\/estado/, (msg) => {
 });
 
 async function analizarMercado() {
-    const exchange = new ccxt.coinbase({ enableRateLimit: true });
+    // --- CORRECCIÓN CLAVE: CAMBIO A BINANCE Y AUMENTO DE TIMEOUT ---
+    const exchange = new ccxt.binance({ 
+        enableRateLimit: true,
+        timeout: 30000 // 30 segundos para evitar RequestTimeout en Railway
+    });
     
-    // GESTIÓN DEL DÍA
-    // ¡AQUÍ ESTÁ EL SEGUNDO CORREGIDO!
-    const hoy = new Date().toISOString().split('T')[0];
+    const hoy = new Date().toISOString().split('T');
     if (estadoBot.diaActual !== hoy) {
         estadoBot.diaActual = hoy;
-        await sincronizarSaldoFTMO(); // Sincroniza apenas empieza el día
+        await sincronizarSaldoFTMO(); 
         estadoBot.balanceInicioDia = estadoBot.balance;
         estadoBot.operacionesHoy = 0; 
         guardarEstado();
@@ -232,13 +232,11 @@ async function analizarMercado() {
         const ohlcv = await exchange.fetchOHLCV(SYMBOL, TIMEFRAME, undefined, 300);
         if (!ohlcv || ohlcv.length === 0) return;
 
-        // LA CORRECCIÓN DE TYPESCRIPT
-        // ¡AQUÍ ESTÁN LOS NÚMEROS DE LAS VELAS CORREGIDOS!
         const velas = ohlcv.map(v => ({
-    high: Number(v[2]),
-    low: Number(v[3]),
-    close: Number(v[4])
-}));
+            high: Number(v),
+            low: Number(v),
+            close: Number(v)
+        }));
         
         const closes = velas.map(v => v.close);
         const highs = velas.map(v => v.high);
@@ -247,7 +245,6 @@ async function analizarMercado() {
 
         // --- GESTIÓN SALIDAS ---
         if (estadoBot.enPosicion) {
-            
             if (!estadoBot.breakEvenActivado) {
                 let activarBE = false;
                 if (estadoBot.tipo === 'LONG') {
@@ -284,7 +281,7 @@ async function analizarMercado() {
                 estadoBot.tipo = 'NINGUNA';
                 estadoBot.breakEvenActivado = false;
                 estadoBot.operacionesHoy++; 
-                await sincronizarSaldoFTMO(); // Lee el saldo exacto después de cerrar
+                await sincronizarSaldoFTMO(); 
                 guardarEstado(); 
                 await notificar(`${mensaje}\n💰 Saldo Actualizado FTMO: $${estadoBot.balance.toFixed(2)}`);
             }
@@ -314,7 +311,7 @@ async function analizarMercado() {
 
         // --- ENTRADAS ---
         if (cierre > sma200 && rsi < 70 && cruceAlcista) {
-            await sincronizarSaldoFTMO(); // Sincroniza antes de arriesgar dinero
+            await sincronizarSaldoFTMO(); 
             const sl = Math.min(...lowsConf.slice(-10)); 
             const tp = precioActual + ((precioActual - sl) * 2); 
             const lotes = calcularTamanoPosicion(estadoBot.balance, RIESGO_POR_OPERACION, precioActual, sl);
@@ -327,7 +324,7 @@ async function analizarMercado() {
             await dispararOrdenMT5('BUY', lotes, sl, tp);
         }
         else if (cierre < sma200 && rsi > 30 && cruceBajista) {
-            await sincronizarSaldoFTMO(); // Sincroniza antes de arriesgar dinero
+            await sincronizarSaldoFTMO(); 
             const sl = Math.max(...highsConf.slice(-10)); 
             const tp = precioActual - ((sl - precioActual) * 2); 
             const lotes = calcularTamanoPosicion(estadoBot.balance, RIESGO_POR_OPERACION, precioActual, sl);
@@ -339,13 +336,15 @@ async function analizarMercado() {
             await notificar(`📉 VENTA (SHORT)\nPrecio: $${precioActual}\nSL: $${sl}\nTP: $${tp}`);
             await dispararOrdenMT5('SELL', lotes, sl, tp);
         }
-    } catch (error) { console.error("❌ Error en análisis:", error); }
+    } catch (error) { 
+        console.error("❌ Error en análisis:", error); 
+    }
 }
 
 async function startBot() {
     await conectarBaseDeDatos(); 
-    await sincronizarSaldoFTMO(); // Sincronización inicial al arrancar
-    await notificar(`🛡️ BOT V5.11 (SINCRONIZADO) ACTIVO\n✅ Días mínimos garantizados\n💰 Saldo Inicial: $${estadoBot.balance.toFixed(2)}`);
+    await sincronizarSaldoFTMO(); 
+    await notificar(`🛡️ BOT V5.11 (CORREGIDO) ACTIVO\n✅ Días mínimos garantizados\n💰 Saldo Inicial: $${estadoBot.balance.toFixed(2)}`);
     setInterval(analizarMercado, 60 * 1000); 
 }
 
