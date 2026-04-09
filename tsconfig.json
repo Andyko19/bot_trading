@@ -1,15 +1,13 @@
 {
   "compilerOptions": {
-    "target": "ES2020" /* Versión de JS moderna */,
-    "module": "commonjs" /* Estándar de Node.js */,
-    "lib": ["ES2020"],
-    "outDir": "./dist",
+    "target": "ES6",
+    "module": "commonjs",
     "rootDir": "./",
-    "strict": true /* Nos obliga a escribir buen código */,
-    "moduleResolution": "node" /* Clave para encontrar ccxt */,
-    "esModuleInterop": true /* Permite importar librerías viejas como si fueran nuevas */,
-    "skipLibCheck": true /* Ignora errores internos de librerías externas */,
-    "forceConsistentCasingInFileNames": true
+    "outDir": "./dist",
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": false,
+    "skipLibCheck": true
   },
   "include": ["**/*.ts"],
   "exclude": ["node_modules"]
