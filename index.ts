@@ -306,7 +306,7 @@ async function analizarMercado() {
         const adxResult = ADX.calculate({ close: closesConf, high: highsConf, low: lowsConf, period: 14 }).pop();
 
         if (!sma200 || !rsi || !macdActual || !adxResult) return;
-        if (adxResult.adx < 25) return;
+        if (adxResult.adx < 20) return;
 
         const cruceAlcista = (macdPrevio.MACD! < macdPrevio.signal!) && (macdActual.MACD! > macdActual.signal!);
         const cruceBajista = (macdPrevio.MACD! > macdPrevio.signal!) && (macdActual.MACD! < macdActual.signal!);
