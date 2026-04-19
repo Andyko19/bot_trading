@@ -101,9 +101,14 @@ function guardarEstado() {
 async function sincronizarSaldoFTMO() {
     try {
         const account = await api.metatraderAccountApi.getAccount(metaApiAccountId!);
+// REGLA DE ORO: Si no está DEPLOYED, no intentamos conectar
+        if (account.state !== 'DEPLOYED') {
+            console.log("⚠️ La cuenta no está lista. Intentando desplegar...");
+            await account.deploy();
+        }
         const connection = account.getRPCConnection();
         await connection.connect();
-        await connection.waitSynchronized();
+        await connection.waitSynchronized(60000);
         const info = await connection.getAccountInformation();
         
         if (info && info.balance) {
@@ -113,6 +118,8 @@ async function sincronizarSaldoFTMO() {
         }
     } catch (error) {
         console.error("❌ Error sincronizando saldo con FTMO:", error);
+// Si falla, reintentamos en 30 segundos automáticamente
+        setTimeout(sincronizarSaldoFTMO, 30000);
     }
 }
 
