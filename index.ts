@@ -126,9 +126,10 @@ async function sincronizarSaldoFTMO() {
 async function dispararOrdenMT5(tipo: 'BUY' | 'SELL', lotes: number, sl: number, tp: number) {
     try {
         const account = await api.metatraderAccountApi.getAccount(metaApiAccountId!);
+if (account.state !== 'DEPLOYED') await account.deploy();
         const connection = account.getRPCConnection();
         await connection.connect();
-        await connection.waitSynchronized();
+        await connection.waitSynchronized(30000);
 
         const symbolMT5 = 'BTCUSD'; 
         const lotesMT5 = Math.round(lotes * 100) / 100;
@@ -140,10 +141,12 @@ async function dispararOrdenMT5(tipo: 'BUY' | 'SELL', lotes: number, sl: number,
             await connection.createMarketSellOrder(symbolMT5, lotesFinales, sl, tp);
         }
         console.log(`✅ ¡Orden ${tipo} ejecutada en FTMO!`);
-    } catch (error) {
-        console.error('❌ Error crítico en MT5:', error);
-        notificar(`❌ ALERTA: Falló conexión con FTMO.`);
-    }
+    } catch (error: any) {
+        console.error('❌ Error crítico en FTMO:', error.message);
+        notificar(`⚠️ Reintentando orden ${tipo} en 5 segundos...`);
+        // Reintento único tras 5 segundos si falla la conexión
+        setTimeout(() => dispararOrdenMT5(tipo, lotes, sl, tp), 5000);
+    }
 }
 
 // 🌙 NUEVO: GATILLO FÍSICO SERENO NOCTURNO
@@ -152,7 +155,7 @@ async function ejecutarSerenoFisico() {
         const account = await api.metatraderAccountApi.getAccount(metaApiAccountId!);
         const connection = account.getRPCConnection();
         await connection.connect();
-        await connection.waitSynchronized();
+        await connection.waitSynchronized(30000);
 
         console.log(`🌙 SERENO: Abriendo operación mínima en FTMO...`);
         const order = await connection.createMarketBuyOrder('BTCUSD', 0.01, 0, 0);
@@ -214,7 +217,7 @@ bot.onText(/\/estado/, (msg) => {
 });
 
 async function analizarMercado() {
-    const exchange = new ccxt.coinbase({ enableRateLimit: true });
+    const exchange = new ccxt.coinbase({ enableRateLimit: true, timeout: 30000});
     
     // GESTIÓN DEL DÍA
     // ¡AQUÍ ESTÁ EL SEGUNDO CORREGIDO!
