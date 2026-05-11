@@ -122,9 +122,15 @@ async function sincronizarSaldoFTMO() {
         setTimeout(sincronizarSaldoFTMO, 30000);
     }
 }
-
+let intentosOrden = 0;
 async function dispararOrdenMT5(tipo: 'BUY' | 'SELL', lotes: number, sl: number, tp: number) {
-    try {
+    if (intentosOrden >= 3) {
+        console.log("❌ Límite de reintentos alcanzado. Abortando para proteger la cuenta.");
+        notificar("⚠️ Orden cancelada tras 3 fallos de conexión. Revisa MetaApi.");
+        intentosOrden = 0; // Reiniciamos para la próxima señal
+        return;
+    }
+        try {
         const account = await api.metatraderAccountApi.getAccount(metaApiAccountId!);
 if (account.state !== 'DEPLOYED') await account.deploy();
         const connection = account.getRPCConnection();
@@ -141,11 +147,19 @@ if (account.state !== 'DEPLOYED') await account.deploy();
             await connection.createMarketSellOrder(symbolMT5, lotesFinales, sl, tp);
         }
         console.log(`✅ ¡Orden ${tipo} ejecutada en FTMO!`);
+intentosOrden = 0;
     } catch (error: any) {
-        console.error('❌ Error crítico en FTMO:', error.message);
-        notificar(`⚠️ Reintentando orden ${tipo} en 5 segundos...`);
-        // Reintento único tras 5 segundos si falla la conexión
-        setTimeout(() => dispararOrdenMT5(tipo, lotes, sl, tp), 5000);
+        intentosOrden++; // Aumentamos el contador de fallos
+        console.error(`❌ Error en intento ${intentosOrden}:`, error.message);
+        
+        // Solo reintentamos si no hemos llegado al límite
+        if (intentosOrden < 3) {
+            notificar(`⚠️ Falló intento ${intentosOrden}/3 con FTMO. Reintentando en 10 segundos...`);
+            setTimeout(() => dispararOrdenMT5(tipo, lotes, sl, tp), 10000); 
+        } else {
+            // Si ya es el tercer fallo, llamamos a la función una vez más para que entre al "if" del inicio y notifique el aborto
+            dispararOrdenMT5(tipo, lotes, sl, tp);
+        }
     }
 }
 
