@@ -659,9 +659,9 @@ Promise<boolean> {
             precio.bid
         );
 
-    console.log(
-        `📊 Spread: ${spread}`
-    );
+    if (spread > 5) {
+    console.log(`⚠️ Spread alto: ${spread}`);
+}
 
     return spread <= MAX_SPREAD;
 }
