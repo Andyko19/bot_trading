@@ -1,5 +1,11 @@
+/* =========================================================
+   BOT FTMO V15 FINAL
+   VERSION CORREGIDA METAAPI + FTMO + TELEGRAM
+========================================================= */
+
 import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
+
 import {
     SMA,
     RSI,
@@ -37,7 +43,7 @@ if (
 }
 
 /* =========================================================
-   CONFIGURACIÓN FTMO
+   CONFIG
 ========================================================= */
 
 const SYMBOL = 'BTCUSD';
@@ -62,7 +68,7 @@ const LOOP_ANALISIS_MS = 60000;
 const PAUSA_NOTICIAS_MINUTOS = 25;
 
 /* =========================================================
-   HORARIOS NOTICIAS FUERTES UTC
+   NOTICIAS UTC
 ========================================================= */
 
 const HORARIOS_NOTICIAS = [
@@ -91,16 +97,11 @@ const mongoClient = new MongoClient(
 );
 
 /* =========================================================
-   CONEXIONES
+   VARIABLES GLOBALES
 ========================================================= */
 
 let rpcConnection: any = null;
-let streamingConnection: any = null;
 let dbCollection: any = null;
-
-/* =========================================================
-   FLAGS
-========================================================= */
 
 let analizando = false;
 let botPausado = false;
@@ -162,7 +163,7 @@ interface EstadoBot {
 }
 
 /* =========================================================
-   ESTADO BOT
+   ESTADO
 ========================================================= */
 
 let estadoBot: EstadoBot = {
@@ -369,13 +370,6 @@ async function conectarMetaApi() {
 
     await rpcConnection.waitSynchronized();
 
-    streamingConnection =
-        account.getStreamingConnection();
-
-    await streamingConnection.connect();
-
-    await streamingConnection.waitSynchronized();
-
     console.log(
         '✅ MetaApi conectado'
     );
@@ -455,7 +449,7 @@ async function detectarNoticiasFuertes() {
 }
 
 /* =========================================================
-   FTMO REAL
+   FTMO
 ========================================================= */
 
 async function sincronizarCuentaFTMO() {
@@ -473,10 +467,6 @@ async function sincronizarCuentaFTMO() {
 
         estadoBot.equity =
             Number(info.equity);
-
-        /*
-           AUTO REPARACIÓN
-        */
 
         const diferencia =
             estadoBot.equityInicioDia -
@@ -536,7 +526,7 @@ async function sincronizarCuentaFTMO() {
 }
 
 /* =========================================================
-   NUEVO DÍA
+   NUEVO DIA
 ========================================================= */
 
 async function verificarNuevoDia() {
@@ -646,41 +636,6 @@ ${estadoBot.equity.toFixed(2)}
             false;
     }
 
-    const limiteTotal =
-        CAPITAL_INICIAL *
-        LIMITE_DD_TOTAL;
-
-    if (
-
-        estadoBot.perdidaTotalActual >=
-        limiteTotal
-
-    ) {
-
-        if (
-            !estadoBot.limiteTotalNotificado
-        ) {
-
-            estadoBot.limiteTotalNotificado =
-                true;
-
-            await guardarEstado();
-
-            await notificar(
-`
-🚨 LÍMITE TOTAL FTMO
-
-📉 DD Total:
--${estadoBot.perdidaTotalActual.toFixed(2)}
-
-⛔ Cuenta protegida
-`
-            );
-        }
-
-        return false;
-    }
-
     return true;
 }
 
@@ -712,30 +667,53 @@ Promise<boolean> {
 }
 
 /* =========================================================
-   VELAS MT5
+   VELAS MT5 CORREGIDO
 ========================================================= */
 
 async function obtenerVelas() {
 
     try {
 
-        const now = new Date();
+        const account =
+            await metaApi
+                .metatraderAccountApi
+                .getAccount(
+                    META_API_ACCOUNT_ID
+                );
 
         const candles =
-            await streamingConnection
+            await account
                 .getHistoricalCandles(
                     SYMBOL,
                     TIMEFRAME,
-                    now,
+                    new Date(),
                     300
                 );
 
+        if (!candles || candles.length === 0) {
+
+            console.log(
+                '⚠️ No llegaron velas'
+            );
+
+            return [];
+        }
+
         return candles.map(
             (c: any) => ({
-                open: Number(c.open),
-                high: Number(c.high),
-                low: Number(c.low),
-                close: Number(c.close)
+
+                open:
+                    Number(c.open),
+
+                high:
+                    Number(c.high),
+
+                low:
+                    Number(c.low),
+
+                close:
+                    Number(c.close)
+
             })
         );
 
@@ -810,7 +788,7 @@ async function sincronizarPosiciones() {
 }
 
 /* =========================================================
-   LOTAJE FTMO REAL
+   LOTES
 ========================================================= */
 
 async function calcularLotes(
@@ -916,39 +894,6 @@ async function moverBreakEven() {
 }
 
 /* =========================================================
-   CERRAR POSICIONES
-========================================================= */
-
-async function cerrarPosiciones() {
-
-    const posiciones =
-        await rpcConnection
-            .getPositions();
-
-    for (const p of posiciones) {
-
-        await rpcConnection
-            .closePosition(
-                p.id
-            );
-    }
-
-    estadoBot.enPosicion =
-        false;
-
-    estadoBot.tipo =
-        'NINGUNA';
-
-    estadoBot.ticket =
-        null;
-
-    estadoBot.breakEvenActivado =
-        false;
-
-    await guardarEstado();
-}
-
-/* =========================================================
    ORDENES
 ========================================================= */
 
@@ -992,7 +937,40 @@ async function abrirOperacion(
 }
 
 /* =========================================================
-   TELEGRAM COMANDOS
+   CERRAR POSICIONES
+========================================================= */
+
+async function cerrarPosiciones() {
+
+    const posiciones =
+        await rpcConnection
+            .getPositions();
+
+    for (const p of posiciones) {
+
+        await rpcConnection
+            .closePosition(
+                p.id
+            );
+    }
+
+    estadoBot.enPosicion =
+        false;
+
+    estadoBot.tipo =
+        'NINGUNA';
+
+    estadoBot.ticket =
+        null;
+
+    estadoBot.breakEvenActivado =
+        false;
+
+    await guardarEstado();
+}
+
+/* =========================================================
+   TELEGRAM
 ========================================================= */
 
 bot.onText(
@@ -1002,10 +980,6 @@ bot.onText(
         const resultadoHoy =
             estadoBot.equity -
             estadoBot.equityInicioDia;
-
-        const resultadoTotal =
-            estadoBot.equity -
-            CAPITAL_INICIAL;
 
         await notificar(
 `
@@ -1032,14 +1006,8 @@ ${resultadoHoy.toFixed(2)}
 📉 DD Diario:
 -${estadoBot.perdidaDiariaActual.toFixed(2)}
 
-📉 DD Total:
--${estadoBot.perdidaTotalActual.toFixed(2)}
-
 📈 Operaciones:
 ${estadoBot.operacionesHoy}
-
-✅ Operó Hoy:
-${estadoBot.operoHoyFTMO ? 'SI' : 'NO'}
 
 🔒 BreakEven:
 ${estadoBot.breakEvenActivado}
@@ -1092,7 +1060,7 @@ bot.onText(
 );
 
 /* =========================================================
-   ANALISIS PRINCIPAL
+   ANALISIS
 ========================================================= */
 
 async function analizarMercado() {
@@ -1229,9 +1197,9 @@ async function analizarMercado() {
             atr < MIN_ATR
         ) return;
 
-        /* =================================================
+        /* =========================
            LONG
-        ================================================= */
+        ========================= */
 
         if (
 
@@ -1319,9 +1287,9 @@ ${lotes}
             );
         }
 
-        /* =================================================
+        /* =========================
            SHORT
-        ================================================= */
+        ========================= */
 
         else if (
 
@@ -1423,7 +1391,7 @@ ${lotes}
 }
 
 /* =========================================================
-   LOOP PRINCIPAL
+   LOOP
 ========================================================= */
 
 async function loopPrincipal() {
@@ -1467,10 +1435,6 @@ async function start() {
     await sincronizarPosiciones();
 
     await verificarNuevoDia();
-
-    /*
-       PROTECCIÓN RESTART RAILWAY
-    */
 
     if (
 
