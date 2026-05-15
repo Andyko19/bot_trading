@@ -1,6 +1,6 @@
 /* =========================================================
-   BOT FTMO V16 INSTITUCIONAL
-   PRICE ACTION + ESTRUCTURA + FTMO SAFE
+   BOT FTMO V17 INSTITUCIONAL
+   FIX SINCRONIZACION REAL MT5 + FTMO
 ========================================================= */
 
 import TelegramBot from 'node-telegram-bot-api';
@@ -66,14 +66,13 @@ const MIN_ADX = 25;
 const MIN_ATR = 40;
 
 const VELAS_SOPORTE_RESISTENCIA = 50;
-
 const VELAS_CONSOLIDACION = 8;
 
 const ATR_MULTIPLICADOR_SL = 1.5;
 const ATR_MULTIPLICADOR_TP = 3;
 
 /* =========================================================
-   HORARIOS NOTICIAS
+   NOTICIAS
 ========================================================= */
 
 const HORARIOS_NOTICIAS = [
@@ -153,6 +152,8 @@ let estadoBot = {
 
     limiteDiarioNotificado: false,
 
+    ultimaOperacionCerrada: false,
+
     diaActual:
         new Date()
             .toISOString()
@@ -212,11 +213,11 @@ async function conectarMongo() {
         mongoClient.db('TradingBotDB');
 
     dbCollection =
-        db.collection('estado_v16');
+        db.collection('estado_v17');
 
     const guardado =
         await dbCollection.findOne({
-            id: 'BOT_V16'
+            id: 'BOT_V17'
         });
 
     if (guardado) {
@@ -235,7 +236,7 @@ async function conectarMongo() {
 async function guardarEstado() {
 
     await dbCollection.updateOne(
-        { id: 'BOT_V16' },
+        { id: 'BOT_V17' },
         {
             $set: {
                 ...estadoBot,
@@ -463,12 +464,7 @@ async function validarSpread() {
             precio.bid
         );
 
-    if (spread > 5) {
-
-        console.log(
-            `⚠️ Spread alto: ${spread}`
-        );
-    }
+    console.log(`📊 Spread: ${spread}`);
 
     return spread <= MAX_SPREAD;
 }
@@ -521,55 +517,101 @@ async function obtenerVelas() {
 }
 
 /* =========================================================
-   POSICIONES
+   SINCRONIZAR POSICIONES
 ========================================================= */
 
 async function sincronizarPosiciones() {
 
-    const posiciones =
-        await rpcConnection
-            .getPositions();
+    try {
 
-    if (
-        posiciones.length > 0
-    ) {
+        const posiciones =
+            await rpcConnection
+                .getPositions();
 
-        const p = posiciones[0];
+        /* =====================================
+           SI HAY POSICIONES ABIERTAS
+        ===================================== */
 
-        estadoBot.enPosicion = true;
+        if (
+            posiciones.length > 0
+        ) {
 
-        estadoBot.tipo =
-            p.type ===
-            'POSITION_TYPE_BUY'
-                ? 'LONG'
-                : 'SHORT';
+            const p = posiciones[0];
 
-        estadoBot.precioEntrada =
-            Number(p.openPrice);
+            estadoBot.enPosicion = true;
 
-        estadoBot.stopLoss =
-            Number(p.stopLoss || 0);
+            estadoBot.tipo =
+                p.type ===
+                'POSITION_TYPE_BUY'
+                    ? 'LONG'
+                    : 'SHORT';
 
-        estadoBot.takeProfit =
-            Number(p.takeProfit || 0);
+            estadoBot.precioEntrada =
+                Number(p.openPrice);
 
-        estadoBot.lotes =
-            Number(p.volume);
+            estadoBot.stopLoss =
+                Number(p.stopLoss || 0);
 
-        estadoBot.ticket = p.id;
+            estadoBot.takeProfit =
+                Number(p.takeProfit || 0);
 
-    } else {
+            estadoBot.lotes =
+                Number(p.volume);
 
-        estadoBot.enPosicion = false;
+            estadoBot.ticket = p.id;
 
-        estadoBot.tipo = 'NINGUNA';
+            estadoBot.ultimaOperacionCerrada = false;
+        }
 
-        estadoBot.ticket = null;
+        /* =====================================
+           SI YA NO HAY POSICIONES
+        ===================================== */
 
-        estadoBot.breakEvenActivado = false;
+        else {
+
+            if (
+                estadoBot.enPosicion
+            ) {
+
+                await notificar(
+`
+✅ OPERACION CERRADA
+
+📌 Trade finalizado en FTMO
+
+🔄 Estado sincronizado
+`
+                );
+            }
+
+            estadoBot.enPosicion = false;
+
+            estadoBot.tipo = 'NINGUNA';
+
+            estadoBot.precioEntrada = 0;
+
+            estadoBot.stopLoss = 0;
+
+            estadoBot.takeProfit = 0;
+
+            estadoBot.ticket = null;
+
+            estadoBot.lotes = 0;
+
+            estadoBot.breakEvenActivado = false;
+
+            estadoBot.ultimaOperacionCerrada = true;
+        }
+
+        await guardarEstado();
+
+    } catch (error) {
+
+        console.error(
+            '❌ Sync posiciones:',
+            error
+        );
     }
-
-    await guardarEstado();
 }
 
 /* =========================================================
@@ -621,54 +663,87 @@ async function calcularLotes(
 
 async function moverBreakEven() {
 
-    if (
-        !estadoBot.enPosicion ||
-        estadoBot.breakEvenActivado ||
-        !estadoBot.ticket
-    ) return;
+    try {
 
-    const precio =
-        await rpcConnection
-            .getSymbolPrice(
-                SYMBOL
+        if (
+            !estadoBot.enPosicion ||
+            estadoBot.breakEvenActivado ||
+            !estadoBot.ticket
+        ) return;
+
+        const posiciones =
+            await rpcConnection
+                .getPositions();
+
+        const posicionExiste =
+            posiciones.find(
+                (p: any) =>
+                    p.id === estadoBot.ticket
             );
 
-    const actual = precio.bid;
+        if (!posicionExiste) {
 
-    const avance =
-        Math.abs(
-            actual -
-            estadoBot.precioEntrada
-        );
-
-    const objetivo =
-        Math.abs(
-            estadoBot.takeProfit -
-            estadoBot.precioEntrada
-        );
-
-    if (
-        avance >=
-        (objetivo * 0.5)
-    ) {
-
-        await rpcConnection
-            .modifyPosition(
-                estadoBot.ticket,
-                estadoBot.precioEntrada,
-                estadoBot.takeProfit
+            console.log(
+                '⚠️ Posición ya cerrada'
             );
 
-        estadoBot.stopLoss =
-            estadoBot.precioEntrada;
+            await sincronizarPosiciones();
 
-        estadoBot.breakEvenActivado = true;
+            return;
+        }
 
-        await guardarEstado();
+        const precio =
+            await rpcConnection
+                .getSymbolPrice(
+                    SYMBOL
+                );
 
-        await notificar(
-            '🔒 BreakEven activado'
+        const actual = precio.bid;
+
+        const avance =
+            Math.abs(
+                actual -
+                estadoBot.precioEntrada
+            );
+
+        const objetivo =
+            Math.abs(
+                estadoBot.takeProfit -
+                estadoBot.precioEntrada
+            );
+
+        if (
+            avance >=
+            (objetivo * 0.5)
+        ) {
+
+            await rpcConnection
+                .modifyPosition(
+                    estadoBot.ticket,
+                    estadoBot.precioEntrada,
+                    estadoBot.takeProfit
+                );
+
+            estadoBot.stopLoss =
+                estadoBot.precioEntrada;
+
+            estadoBot.breakEvenActivado = true;
+
+            await guardarEstado();
+
+            await notificar(
+                '🔒 BreakEven activado'
+            );
+        }
+
+    } catch (error) {
+
+        console.error(
+            '❌ BreakEven:',
+            error
         );
+
+        await sincronizarPosiciones();
     }
 }
 
@@ -750,13 +825,16 @@ function detectarConsolidacion(
 
 bot.onText(/\/estado/, async () => {
 
+    await sincronizarCuentaFTMO();
+    await sincronizarPosiciones();
+
     const resultadoHoy =
         estadoBot.equity -
         estadoBot.equityInicioDia;
 
     await notificar(
 `
-📊 BOT FTMO V16
+📊 BOT FTMO V17
 
 📌 Posición:
 ${estadoBot.tipo}
@@ -824,13 +902,15 @@ bot.onText(/\/cerrar/, async () => {
             );
     }
 
+    await sincronizarPosiciones();
+
     await notificar(
         '🛑 Posiciones cerradas'
     );
 });
 
 /* =========================================================
-   ANALISIS V16
+   ANALISIS
 ========================================================= */
 
 async function analizarMercado() {
@@ -840,18 +920,30 @@ async function analizarMercado() {
         botPausado
     ) return;
 
-    if (
-        estadoBot.enPosicion
-    ) {
-
-        await moverBreakEven();
-
-        return;
-    }
-
     analizando = true;
 
     try {
+
+        /* =====================================
+           SINCRONIZACION REAL
+        ===================================== */
+
+        await sincronizarCuentaFTMO();
+
+        await sincronizarPosiciones();
+
+        /* =====================================
+           SI HAY POSICION ABIERTA
+        ===================================== */
+
+        if (
+            estadoBot.enPosicion
+        ) {
+
+            await moverBreakEven();
+
+            return;
+        }
 
         await detectarNoticiasFuertes();
 
@@ -862,8 +954,6 @@ async function analizarMercado() {
         if (
             esFinDeSemana()
         ) return;
-
-        await sincronizarCuentaFTMO();
 
         await verificarNuevoDia();
 
@@ -1101,25 +1191,7 @@ async function analizarMercado() {
 
             if (!orden) return;
 
-            estadoBot.enPosicion = true;
-
-            estadoBot.tipo = 'LONG';
-
-            estadoBot.precioEntrada =
-                precioActual;
-
-            estadoBot.stopLoss = sl;
-
-            estadoBot.takeProfit = tp;
-
-            estadoBot.ticket =
-                orden.positionId;
-
-            estadoBot.lotes = lotes;
-
             estadoBot.operacionesHoy++;
-
-            estadoBot.operoHoyFTMO = true;
 
             await guardarEstado();
 
@@ -1138,8 +1210,6 @@ ${tp}
 
 📦 Lotes:
 ${lotes}
-
-📈 Breakout confirmado
 `
             );
         }
@@ -1197,25 +1267,7 @@ ${lotes}
 
             if (!orden) return;
 
-            estadoBot.enPosicion = true;
-
-            estadoBot.tipo = 'SHORT';
-
-            estadoBot.precioEntrada =
-                precioActual;
-
-            estadoBot.stopLoss = sl;
-
-            estadoBot.takeProfit = tp;
-
-            estadoBot.ticket =
-                orden.positionId;
-
-            estadoBot.lotes = lotes;
-
             estadoBot.operacionesHoy++;
-
-            estadoBot.operoHoyFTMO = true;
 
             await guardarEstado();
 
@@ -1234,8 +1286,6 @@ ${tp}
 
 📦 Lotes:
 ${lotes}
-
-📉 Breakout bajista confirmado
 `
             );
         }
@@ -1286,7 +1336,7 @@ async function loopPrincipal() {
 async function start() {
 
     console.log(
-        '🚀 BOT FTMO V16'
+        '🚀 BOT FTMO V17'
     );
 
     await conectarMongo();
@@ -1302,7 +1352,7 @@ async function start() {
     await guardarEstado();
 
     await notificar(
-        '🛡️ BOT FTMO V16 ONLINE'
+        '🛡️ BOT FTMO V17 ONLINE'
     );
 
     await loopPrincipal();
