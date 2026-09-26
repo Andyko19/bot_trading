@@ -15,27 +15,35 @@ const {
 } = process.env;
 
 if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID || !META_API_TOKEN || !META_API_ACCOUNT_ID || !MONGO_URI) {
-    console.error('❌ Error crítico: Faltan variables esenciales en tu archivo .env');
+    console.error('❌ Error crítico: Faltan variables esenciales en el archivo .env');
     process.exit(1);
 }
 
-// CONFIGURACIÓN OPERATIVA NORMADA - REGLAS DE CUENTA FTMO DE $10,000
 const SYMBOL = 'BTCUSD';
 const TF_MAYOR = '4h';
 const TF_ENTRADA = '15m';
 const CAPITAL_EVALUACION = 10000;
 
-const PROFT_OBJETIVO_FASE1 = 1000;    // 10% de objetivo
-const RISK_PER_TRADE = 0.005;         // 0.5% por operación
-const FTMO_DIARIO_MAX_LOSS = 450;     // Margen seguro (Límite real: 500)
-const FTMO_TOTAL_MAX_LOSS = 900;      // Margen seguro (Límite real: 1000)
+const PROFIT_OBJETIVO_FASE1 = 1000;
+const RISK_PER_TRADE = 0.005;
+const FTMO_DIARIO_MAX_LOSS = 450;
+const FTMO_TOTAL_MAX_LOSS = 900;
 const MAX_OPERACIONES_DIA = 2;
 const MAX_SPREAD_PUNTOS = 60;
-const RR = 3; 
+const RR = 3;
+
+function obtenerFechaFTMO(): string {
+    return new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Europe/Prague',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    }).format(new Date());
+}
 
 let estadoBot = {
     enPosicion: false,
-    tipo: 'NINGUNA',
+    tipo: 'NINGUNA' as 'LONG' | 'SHORT' | 'NINGUNA',
     precioEntrada: 0,
     stopLoss: 0,
     takeProfit: 0,
@@ -48,7 +56,7 @@ let estadoBot = {
     operacionesHoy: 0,
     breakEvenActivado: false,
     ticket: null as any,
-    diaActual: new Date().toISOString().split('T')[0],
+    diaActual: obtenerFechaFTMO(),
     faseSuperada: false
 };
 
@@ -61,18 +69,15 @@ let rpcConnection: any;
 let dbCollection: any;
 let analizando = false;
 
-/* =========================================================
-   SISTEMA DE SEGURIDAD CON REINTENTOS EXPONENCIALES
-========================================================= */
 async function conectarConReintentos<T>(fn: () => Promise<T>, nombreModulo: string, maxIntentos = 5): Promise<T> {
     let tiempoEspera = 5000; 
     for (let intento = 1; intento <= maxIntentos; intento++) {
         try {
             return await fn();
         } catch (error) {
-            console.error(`⚠️ [Intento ${intento}/${maxIntentos}] Falló la conexión con ${nombreModulo}.`);
+            console.error(`⚠️ [Intento ${intento}/${maxIntentos}] Falló conexión con ${nombreModulo}.`);
             if (intento === maxIntentos) {
-                const alerta = `🚨 *ERROR CRÍTICO INFRAESTRUCTURA:* El bot no se pudo conectar a ${nombreModulo} tras ${maxIntentos} intentos. Auto-apagado de emergencia activado para evitar bloqueos de API.`;
+                const alerta = `🚨 *ERROR CRÍTICO:* No se pudo conectar a ${nombreModulo} tras ${maxIntentos} intentos.`;
                 await telegram.enviarMensaje(alerta);
                 process.exit(1);
             }
@@ -83,9 +88,6 @@ async function conectarConReintentos<T>(fn: () => Promise<T>, nombreModulo: stri
     throw new Error('Inalcanzable');
 }
 
-/* =========================================================
-   MÓDULOS DE CONEXIÓN
-========================================================= */
 async function inicializarBaseDatos() {
     await mongoClient.connect();
     const db = mongoClient.db('TradingBotDB');
@@ -94,7 +96,7 @@ async function inicializarBaseDatos() {
     if (guardado) {
         delete guardado._id;
         estadoBot = { ...estadoBot, ...guardado };
-        console.log('💾 [MongoDB] Memoria restaurada correctamente.');
+        console.log('💾 [MongoDB] Estado previo restaurado correctamente.');
     }
 }
 
@@ -107,183 +109,111 @@ async function inicializarMetaApi() {
     rpcConnection = account.getRPCConnection();
     await rpcConnection.connect();
     await rpcConnection.waitSynchronized();
-    console.log('✅ [MetaAPI] Terminal sincronizada y lista.');
+    console.log('✅ [MetaAPI] Terminal MT5 sincronizada.');
 }
 
-/* =========================================================
-   PROTECCIÓN DE DRAWDOWN Y MÓDULO FTMO
-========================================================= */
 async function sincronizarMetricasFTMO() {
     const info = await rpcConnection.getAccountInformation();
     estadoBot.balance = Number(info.balance);
     estadoBot.equity = Number(info.equity);
 
-    const perdidaFlotante = estadoBot.balance - estadoBot.equity;
-    const resultadoCerradoHoy = estadoBot.balance - estadoBot.balanceInicioDia;
-    const drawdownRealDia = resultadoCerradoHoy - perdidaFlotante;
+    const baseCalculo = estadoBot.balanceInicioDia;
+    const perdidaDia = baseCalculo - estadoBot.equity;
+    estadoBot.perdidaDiariaActual = perdidaDia > 0 ? Number(perdidaDia.toFixed(2)) : 0;
 
-    estadoBot.perdidaDiariaActual = drawdownRealDia < 0 ? Math.abs(drawdownRealDia) : 0;
-    estadoBot.perdidaTotalActual = CAPITAL_EVALUACION - estadoBot.equity;
-    if (estadoBot.perdidaTotalActual < 0) estadoBot.perdidaTotalActual = 0;
+    const perdidaTotal = CAPITAL_EVALUACION - estadoBot.equity;
+    estadoBot.perdidaTotalActual = perdidaTotal > 0 ? Number(perdidaTotal.toFixed(2)) : 0;
 
-    if ((estadoBot.balance - CAPITAL_EVALUACION) >= PROFT_OBJETIVO_FASE1 && !estadoBot.faseSuperada) {
+    if ((estadoBot.balance - CAPITAL_EVALUACION) >= PROFIT_OBJETIVO_FASE1 && !estadoBot.faseSuperada) {
         estadoBot.faseSuperada = true;
         await dbCollection.updateOne({ id: 'BOT_REAL' }, { $set: estadoBot }, { upsert: true });
-        await telegram.enviarMensaje('🎉 🏆 *¡OBJETIVO FTMO ALCANZADO!* El balance objetivo ha sido conquistado de forma segura. Operaciones congeladas para proteger tu pase de fase.');
+        await telegram.enviarMensaje('🎉 🏆 *¡FASE 1 COMPLETADA!* Target del 10% alcanzado. Operativa pausada.');
     }
 }
 
 async function verificarCambioDeDia() {
-    const hoy = new Date().toISOString().split('T')[0];
-    if (estadoBot.diaActual !== hoy) {
-        if (estadoBot.operacionesHoy === 0 && !estadoBot.enPosicion && !estadoBot.faseSuperada) {
-            try {
-                const spec = await rpcConnection.getSymbolSpecification(SYMBOL);
-                const minVol = spec.minVolume || 0.01;
-                const precio =
-    await rpcConnection.getSymbolPrice(
-        SYMBOL
-    );
-
-await rpcConnection.createMarketBuyOrder(
-    SYMBOL,
-    minVol,
-    precio.bid - 100,
-    precio.bid + 100
-);
-if (
-    !precio ||
-    !precio.ask ||
-    !precio.bid
-) {
-    return;
-}
-                const ticketConsistencia = await rpcConnection.createMarketBuyOrder(SYMBOL, minVol, 0, 0);
-                if (ticketConsistencia) {
-                    await new Promise(resolve => setTimeout(resolve, 60000)); 
-                    await rpcConnection.closePosition(ticketConsistencia.id);
-                    console.log('🛡️ Trade mínimo de consistencia diario completado con éxito.');
-                }
-            } catch (e) {
-                console.error('Error procesando trade de consistencia:', e);
-            }
-        }
-
-        estadoBot.diaActual = hoy;
+    const fechaServidor = obtenerFechaFTMO();
+    if (estadoBot.diaActual !== fechaServidor) {
+        console.log(`🌅 Cambio de día FTMO detectado (${estadoBot.diaActual} -> ${fechaServidor})`);
+        
+        estadoBot.diaActual = fechaServidor;
         estadoBot.operacionesHoy = 0;
-        estadoBot.balanceInicioDia = estadoBot.balance;
+        estadoBot.balanceInicioDia = Math.max(estadoBot.balance, estadoBot.equity);
         estadoBot.perdidaDiariaActual = 0;
+
         await dbCollection.updateOne({ id: 'BOT_REAL' }, { $set: estadoBot }, { upsert: true });
-        await telegram.enviarMensaje('🌅 *Nuevo ciclo diario financiero.* Parámetros de Drawdown restaurados.');
+        await telegram.enviarMensaje('🌅 *Ciclo Diario FTMO Reiniciado:* Métricas de drawdown restablecidas.');
     }
 }
 
-/* =========================================================
-   GESTIÓN DE RIESGO Y CONTROL DE VOLUMEN (LOTAJE)
-========================================================= */
 async function calcularLotesSeguros(distanciaPrecioSL: number): Promise<number> {
     const riesgoUSD = estadoBot.balance * RISK_PER_TRADE;
-
     const spec = await rpcConnection.getSymbolSpecification(SYMBOL);
 
-    const tickValue = spec.tickValue || 1;
-    const tickSize = spec.tickSize || 1;
-
-    const valorMovimiento = tickValue / tickSize;
-
-    let lotes =
-        riesgoUSD /
-        (distanciaPrecioSL * valorMovimiento);
-
+    const contractSize = Number(spec.contractSize) || 1;
     const minVol = spec.minVolume || 0.01;
-    const maxVol = spec.maxVolume || 10.0;
+    const maxVol = spec.maxVolume || 5.0;
     const step = spec.volumeStep || 0.01;
 
-const LIMITE_MAX_LOTES = 1.0; 
-    
+    let lotes = riesgoUSD / (distanciaPrecioSL * contractSize);
+    const precisionStep = step.toString().split('.')[1]?.length || 2;
+    lotes = Math.floor(lotes / step) * step;
+
     if (lotes < minVol) lotes = minVol;
     if (lotes > maxVol) lotes = maxVol;
-    if (lotes > LIMITE_MAX_LOTES) lotes = LIMITE_MAX_LOTES; // <-- Nueva protección
 
-    const lotesFinal =
-    Number(
-        (Math.round(lotes / step) * step)
-        .toFixed(2)
-    );
-
-console.log('========== RIESGO ==========');
-console.log('Balance:', estadoBot.balance);
-console.log('Riesgo USD:', riesgoUSD);
-console.log('Distancia SL:', distanciaPrecioSL);
-console.log('TickValue:', tickValue);
-console.log('TickSize:', tickSize);
-console.log('Lotes Calculados:', lotesFinal);
-console.log('============================');
-
-return lotesFinal;
+    return Number(lotes.toFixed(precisionStep));
 }
 
 async function moverBreakEven() {
-    if (!estadoBot.enPosicion || estadoBot.breakEvenActivado) return;
+    if (!estadoBot.enPosicion || estadoBot.breakEvenActivado || !estadoBot.ticket) return;
 
     const precio = await rpcConnection.getSymbolPrice(SYMBOL);
+    if (!precio) return;
 
-    const actual =
-        estadoBot.tipo === 'LONG'
-            ? precio.bid
-            : precio.ask;
-
-    const avance =
-        Math.abs(actual - estadoBot.precioEntrada);
-
-    const objetivoTotal =
-        Math.abs(
-            estadoBot.takeProfit -
-            estadoBot.precioEntrada
-        );
+    const actual = estadoBot.tipo === 'LONG' ? precio.bid : precio.ask;
+    const avance = Math.abs(actual - estadoBot.precioEntrada);
+    const objetivoTotal = Math.abs(estadoBot.takeProfit - estadoBot.precioEntrada);
 
     if (avance >= objetivoTotal * 0.5) {
         try {
+            const buffer = estadoBot.precioEntrada * 0.0005;
+            const nuevoSL = estadoBot.tipo === 'LONG' 
+                ? Number((estadoBot.precioEntrada + buffer).toFixed(2))
+                : Number((estadoBot.precioEntrada - buffer).toFixed(2));
 
-            const buffer =
-    Math.abs(
-        estadoBot.takeProfit -
-        estadoBot.precioEntrada
-    ) * 0.05;
-    const nuevoSL = estadoBot.tipo === 'LONG' 
-                ? estadoBot.precioEntrada + buffer 
-                : estadoBot.precioEntrada - buffer;
-            await rpcConnection.modifyPosition(
-                estadoBot.ticket,
-                
-                nuevoSL,
-                estadoBot.takeProfit
-            );
-
+            await rpcConnection.modifyPosition(estadoBot.ticket, nuevoSL, estadoBot.takeProfit);
             estadoBot.breakEvenActivado = true;
+            estadoBot.stopLoss = nuevoSL;
 
-            await dbCollection.updateOne(
-                { id: 'BOT_REAL' },
-                { $set: estadoBot },
-                { upsert: true }
-            );
-
-            await telegram.enviarMensaje(
-                '🔒 *BreakEven Automático:* Riesgo eliminado. Stop Loss movido a zona segura.'
-            );
-
-        } catch (error) {
-            console.error(
-                'Error aplicando ajuste BreakEven:',
-                error
-            );
+            await dbCollection.updateOne({ id: 'BOT_REAL' }, { $set: estadoBot }, { upsert: true });
+            await telegram.enviarMensaje('🔒 *Break-Even Ejecutado:* Stop Loss reubicado por encima del punto de equilibrio.');
+        } catch (error: any) {
+            console.error('Error aplicando Break-Even:', error.message);
         }
     }
 }
 
-/* =========================================================
-   ORQUESTADOR GENERAL Y TRATAMIENTO DE VELAS
-========================================================= */
+async function sincronizarEstatusPosiciones() {
+    const posiciones = await rpcConnection.getPositions();
+    if (posiciones && posiciones.length > 0) {
+        const p = posiciones[0];
+        estadoBot.enPosicion = true;
+        estadoBot.tipo = p.type === 'POSITION_TYPE_BUY' ? 'LONG' : 'SHORT';
+        estadoBot.precioEntrada = Number(p.openPrice);
+        estadoBot.ticket = p.id;
+    } else {
+        if (estadoBot.enPosicion) {
+            await telegram.enviarMensaje('📉 *Aviso:* Posición cerrada en terminal MT5.');
+        }
+        estadoBot.enPosicion = false;
+        estadoBot.tipo = 'NINGUNA';
+        estadoBot.ticket = null;
+        estadoBot.breakEvenActivado = false;
+    }
+    await dbCollection.updateOne({ id: 'BOT_REAL' }, { $set: estadoBot }, { upsert: true });
+}
+
 async function obtenerVelasServidor(tf: string, limite: number): Promise<Candle[]> {
     try {
         const account = await metaApi.metatraderAccountApi.getAccount(META_API_ACCOUNT_ID);
@@ -294,30 +224,10 @@ async function obtenerVelasServidor(tf: string, limite: number): Promise<Candle[
             low: Number(c.low),
             close: Number(c.close)
         }));
-    } catch (e) {
-        console.error(`Error de lectura en velas ${tf}:`, e);
+    } catch (e: any) {
+        console.error(`Error descargando velas ${tf}:`, e.message);
         return [];
     }
-}
-
-async function sincronizarEstatusPosiciones() {
-    const posiciones = await rpcConnection.getPositions();
-    if (posiciones.length > 0) {
-        const p = posiciones[0];
-        estadoBot.enPosicion = true;
-        estadoBot.tipo = p.type === 'POSITION_TYPE_BUY' ? 'LONG' : 'SHORT';
-        estadoBot.precioEntrada = Number(p.openPrice);
-        estadoBot.ticket = p.id;
-    } else {
-        if (estadoBot.enPosicion) {
-            await telegram.enviarMensaje('📉 *Aviso:* Operación actual cerrada en la plataforma MT5.');
-        }
-        estadoBot.enPosicion = false;
-        estadoBot.tipo = 'NINGUNA';
-        estadoBot.ticket = null;
-        estadoBot.breakEvenActivado = false;
-    }
-    await dbCollection.updateOne({ id: 'BOT_REAL' }, { $set: estadoBot }, { upsert: true });
 }
 
 async function ejecutarCicloEstrategia() {
@@ -329,122 +239,85 @@ async function ejecutarCicloEstrategia() {
         await sincronizarEstatusPosiciones();
         await verificarCambioDeDia();
 
-        if (estadoBot.perdidaDiariaActual >= FTMO_DIARIO_MAX_LOSS || estadoBot.perdidaTotalActual >= FTMO_TOTAL_MAX_LOSS) {
-            analizando = false;
+        if (estadoBot.perdidaDiariaActual >= FTMO_DIARIO_MAX_LOSS) {
+            console.warn('🛑 Operativa pausada: Límite diario de seguridad alcanzado.');
+            return;
+        }
+        if (estadoBot.perdidaTotalActual >= FTMO_TOTAL_MAX_LOSS) {
+            console.warn('🛑 Operativa pausada: Límite total de seguridad alcanzado.');
             return;
         }
 
         if (estadoBot.enPosicion) {
             await moverBreakEven();
-            analizando = false;
             return;
         }
 
         if (estadoBot.operacionesHoy >= MAX_OPERACIONES_DIA) {
-            analizando = false;
             return;
         }
 
         const precio = await rpcConnection.getSymbolPrice(SYMBOL);
         if (!precio || typeof precio.ask !== 'number' || typeof precio.bid !== 'number') {
-    console.warn('⚠️ Precio no disponible, omitiendo ciclo.');
-    analizando = false;
-    return;
-}
+            return;
+        }
+
         const spec = await rpcConnection.getSymbolSpecification(SYMBOL);
-        const spreadPuntos = Math.abs(precio.ask - precio.bid) / (spec.point || 0.01);
-        if (spreadPuntos > MAX_SPREAD_PUNTOS) {
-            analizando = false;
+        const point = Number(spec.point) || 0.01;
+        const spreadActual = Math.abs(precio.ask - precio.bid) / point;
+
+        if (spreadActual > MAX_SPREAD_PUNTOS) {
+            console.log(`Spread excesivo (${spreadActual.toFixed(1)} puntos). Entrada omitida.`);
             return;
         }
 
         const velas4H = await obtenerVelasServidor(TF_MAYOR, 40);
         const velas15m = await obtenerVelasServidor(TF_ENTRADA, 30);
 
-        if (velas4H.length === 0 || velas15m.length === 0) {
-            analizando = false;
-            return;
-        }
+        if (velas4H.length === 0 || velas15m.length === 0) return;
 
-        const estructura =
-    SmcStrategy.analizarEstructura4H(
-        velas4H
-    );
-
-const resultado =
-    SmcStrategy.buscarEntrada(
-        velas15m,
-        estructura,
-        RR
-    );
-
-console.log('═══════════════════════════════');
-console.log('SESGO 4H:', estructura.sesgo);
-console.log('TECHO:', estructura.techo);
-console.log('PISO:', estructura.piso);
-console.log('RESULTADO:', resultado);
-console.log('═══════════════════════════════');
+        const estructura = SmcStrategy.analizarEstructura4H(velas4H);
+        const resultado = SmcStrategy.buscarEntrada(velas15m, estructura, RR);
 
         if (resultado.accion !== 'NINGUNA') {
-            const precioEntradaReal =
-    resultado.accion === 'LONG'
-        ? precio.ask
-        : precio.bid;
+            const precioEntradaReal = resultado.accion === 'LONG' ? precio.ask : precio.bid;
+            const distanciaSL = Math.abs(precioEntradaReal - resultado.sl);
 
-const distanciaSL =
-    Math.abs(
-        precioEntradaReal -
-        resultado.sl
-    );
+            if (distanciaSL <= 0) return;
 
-const lotesApropiados =
-    await calcularLotesSeguros(
-        distanciaSL
-    );
+            const lotesApropiados = await calcularLotesSeguros(distanciaSL);
 
             let ordenConfirmada;
             if (resultado.accion === 'LONG') {
-                ordenConfirmada = await rpcConnection.createMarketBuyOrder(SYMBOL, lotesApropiados, resultado.sl, resultado.tp);
+                ordenConfirmada = await rpcConnection.createMarketBuyOrder(
+                    SYMBOL, 
+                    lotesApropiados, 
+                    resultado.sl, 
+                    resultado.tp
+                );
             } else {
-                ordenConfirmada = await rpcConnection.createMarketSellOrder(SYMBOL, lotesApropiados, resultado.sl, resultado.tp);
+                ordenConfirmada = await rpcConnection.createMarketSellOrder(
+                    SYMBOL, 
+                    lotesApropiados, 
+                    resultado.sl, 
+                    resultado.tp
+                );
             }
 
-           if (ordenConfirmada) {
+            if (ordenConfirmada) {
+                estadoBot.enPosicion = true;
+                estadoBot.tipo = resultado.accion;
+                estadoBot.precioEntrada = precioEntradaReal;
+                estadoBot.stopLoss = resultado.sl;
+                estadoBot.takeProfit = resultado.tp;
+                estadoBot.lotes = lotesApropiados;
+                estadoBot.breakEvenActivado = false;
+                estadoBot.ticket = ordenConfirmada.positionId || ordenConfirmada.orderId || ordenConfirmada.id;
+                estadoBot.operacionesHoy++;
 
-    estadoBot.enPosicion = true;
+                await dbCollection.updateOne({ id: 'BOT_REAL' }, { $set: estadoBot }, { upsert: true });
 
-    estadoBot.tipo =
-        resultado.accion;
-
-    estadoBot.precioEntrada =
-        precioEntradaReal;
-
-    estadoBot.stopLoss =
-        resultado.sl;
-
-    estadoBot.takeProfit =
-        resultado.tp;
-
-    estadoBot.breakEvenActivado =
-        false;
-        estadoBot.ticket =
-    ordenConfirmada.positionId ||
-    ordenConfirmada.orderId ||
-    ordenConfirmada.id;
-    console.log(
-    'RESPUESTA ORDEN:',
-    JSON.stringify(ordenConfirmada, null, 2)
-);
-
-    estadoBot.operacionesHoy++;
-
-    await dbCollection.updateOne(
-        { id: 'BOT_REAL' },
-        { $set: estadoBot },
-        { upsert: true }
-    );
-
-    await telegram.enviarMensaje(`
+                await telegram.enviarMensaje(`
 🚀 *Operación Abierta en FTMO*
 ━━━━━━━━━━━━━━━━━━━━━━━━
 🎯 *Activo:* ${SYMBOL}
@@ -455,51 +328,46 @@ const lotesApropiados =
 📦 *Volumen:* ${lotesApropiados} Lotes
 🧠 *Confluencia:* ${resultado.motivo}
 ━━━━━━━━━━━━━━━━━━━━━━━━
-    `);
-}
+                `);
+            }
         }
-
-    } catch (e) {
-        console.error('Error detectado en el loop ejecutivo:', e);
+    } catch (e: any) {
+        console.error('Error en el ciclo operativo:', e.message);
     } finally {
         analizando = false;
     }
 }
 
-/* =========================================================
-   HILO ARRANCADOR CENTRAL
-========================================================= */
 function registrarComandosTelegram() {
     telegram.onComando(/\/estado/, async () => {
         await sincronizarMetricasFTMO();
         await sincronizarEstatusPosiciones();
         return `
-📊 *ESTADO ACTUAL DEL BOT V20*
+📊 *ESTADO ACTUAL FTMO 10K*
 ━━━━━━━━━━━━━━━━━━━━━━━━
-🤖 *Operación Flotante:* ${estadoBot.tipo}
-💰 *Balance Actual:* $${estadoBot.balance.toFixed(2)}
-💎 *Equity Real:* $${estadoBot.equity.toFixed(2)}
-📉 *Pérdida Diaria:* -$${estadoBot.perdidaDiariaActual.toFixed(2)} / $${FTMO_DIARIO_MAX_LOSS}
-📉 *Pérdida Total:* -$${estadoBot.perdidaTotalActual.toFixed(2)} / $${FTMO_TOTAL_MAX_LOSS}
-⚡ *Trades Realizados Hoy:* ${estadoBot.operacionesHoy} / ${MAX_OPERACIONES_DIA}
-🏆 *Prueba Superada:* ${estadoBot.faseSuperada ? 'SÍ' : 'NO'}
+🤖 *Posición:* ${estadoBot.tipo} (${estadoBot.enPosicion ? 'ACTIVA' : 'NINGUNA'})
+💰 *Balance:* $${estadoBot.balance.toFixed(2)}
+💎 *Equity:* $${estadoBot.equity.toFixed(2)}
+📉 *Pérdida Diaria:* $${estadoBot.perdidaDiariaActual.toFixed(2)} / $${FTMO_DIARIO_MAX_LOSS}
+📉 *Pérdida Total:* $${estadoBot.perdidaTotalActual.toFixed(2)} / $${FTMO_TOTAL_MAX_LOSS}
+⚡ *Trades Hoy:* ${estadoBot.operacionesHoy} / ${MAX_OPERACIONES_DIA}
+🏆 *Objetivo Alcanzado:* ${estadoBot.faseSuperada ? 'SÍ' : 'NO'}
 ━━━━━━━━━━━━━━━━━━━━━━━━
         `;
     });
 }
 
 async function main() {
-    console.log('🚀 Iniciando sistema...');
-    
-    await conectarConReintentos(() => inicializarBaseDatos(), 'MongoDB Server');
-    await conectarConReintentos(() => inicializarMetaApi(), 'MetaAPI Cloud Gateway');
+    console.log('🚀 Iniciando sistema algorítmico...');
+    await conectarConReintentos(() => inicializarBaseDatos(), 'MongoDB');
+    await conectarConReintentos(() => inicializarMetaApi(), 'MetaAPI Terminal');
     
     registrarComandosTelegram();
-    await telegram.enviarMensaje('🛡️ *Bot Algorítmico FTMO v20.0 Activo.* Entorno validado y monitoreando mercados.');
+    await telegram.enviarMensaje('🛡️ *Bot FTMO v20 Activo:* Sistema conectado y sincronizado con Praga.');
 
     while (true) {
         await ejecutarCicloEstrategia();
-        await new Promise(resolve => setTimeout(resolve, 60000)); 
+        await new Promise(resolve => setTimeout(resolve, 60000));
     }
 }
 

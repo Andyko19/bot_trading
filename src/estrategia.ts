@@ -14,17 +14,16 @@ export interface ResultadoEstrategia {
 }
 
 export class SmcStrategy {
-
     private static esSwingHigh(velas: Candle[], idx: number): boolean {
         if (idx < 2 || idx > velas.length - 3) return false;
         const v = velas[idx].high;
-        return v > velas[idx-1].high && v > velas[idx-2].high && v > velas[idx+1].high && v > velas[idx+2].high;
+        return v > velas[idx - 1].high && v > velas[idx - 2].high && v > velas[idx + 1].high && v > velas[idx + 2].high;
     }
 
     private static esSwingLow(velas: Candle[], idx: number): boolean {
         if (idx < 2 || idx > velas.length - 3) return false;
         const v = velas[idx].low;
-        return v < velas[idx-1].low && v < velas[idx-2].low && v < velas[idx+1].low && v < velas[idx+2].low;
+        return v < velas[idx - 1].low && v < velas[idx - 2].low && v < velas[idx + 1].low && v < velas[idx + 2].low;
     }
 
     public static analizarEstructura4H(velas: Candle[]): { sesgo: 'ALCISTA' | 'BAJISTA' | 'RANGO'; techo: number; piso: number } {
@@ -36,64 +35,32 @@ export class SmcStrategy {
             if (this.esSwingLow(velas, i) && piso === Infinity) piso = velas[i].low;
             if (techo !== 0 && piso !== Infinity) break;
         }
-    
+
+        if (techo === 0 || piso === Infinity || techo <= piso) {
+            return { sesgo: 'RANGO', techo, piso };
+        }
 
         const ultimaVela = velas[velas.length - 1];
-        
 
-        if (techo !== 0 && ultimaVela.close > techo) {
+        if (ultimaVela.close > techo) {
             return { sesgo: 'ALCISTA', techo, piso };
         }
-        if (piso !== Infinity && ultimaVela.close < piso) {
+        if (ultimaVela.close < piso) {
             return { sesgo: 'BAJISTA', techo, piso };
         }
-const ultimas5Velas = velas.slice(-5);
 
-let cierresAlcistas = 0;
-let cierresBajistas = 0;
+        const ultimas5Velas = velas.slice(-5);
+        let cierresAlcistas = 0;
+        let cierresBajistas = 0;
 
-for (let i = 1; i < ultimas5Velas.length; i++) {
+        for (let i = 1; i < ultimas5Velas.length; i++) {
+            if (ultimas5Velas[i].close > ultimas5Velas[i - 1].close) cierresAlcistas++;
+            if (ultimas5Velas[i].close < ultimas5Velas[i - 1].close) cierresBajistas++;
+        }
 
-    if (
-        ultimas5Velas[i].close >
-        ultimas5Velas[i - 1].close
-    ) {
-        cierresAlcistas++;
-    }
+        if (cierresAlcistas >= 4) return { sesgo: 'ALCISTA', techo, piso };
+        if (cierresBajistas >= 4) return { sesgo: 'BAJISTA', techo, piso };
 
-    if (
-        ultimas5Velas[i].close <
-        ultimas5Velas[i - 1].close
-    ) {
-        cierresBajistas++;
-    }
-}
-
-if (cierresAlcistas >= 3) {
-    return {
-        sesgo: 'ALCISTA',
-        techo,
-        piso
-    };
-}
-
-if (cierresBajistas >= 3) {
-    return {
-        sesgo: 'BAJISTA',
-        techo,
-        piso
-    };
-}
-const rango4H =
-    Math.abs(techo - piso);
-
-if (rango4H < 300) {
-    return {
-        sesgo: 'RANGO',
-        techo,
-        piso
-    };
-}
         return { sesgo: 'RANGO', techo, piso };
     }
 
@@ -103,214 +70,113 @@ if (rango4H < 300) {
         rr: number
     ): ResultadoEstrategia {
         const len = velas15m.length;
-        if (len < 8) return { accion: 'NINGUNA', precioEntrada: 0, sl: 0, tp: 0, motivo: 'Falta histórico de velas' };
+        if (len < 10) {
+            return { accion: 'NINGUNA', precioEntrada: 0, sl: 0, tp: 0, motivo: 'Velas 15m insuficientes' };
+        }
 
         const precioActual = velas15m[len - 1].close;
-        let puntoA = estructura4H.piso;
-        let puntoB = estructura4H.techo;
-        if (
-    puntoA === Infinity ||
-    puntoB === 0
-) {
-    return {
-        accion: 'NINGUNA',
-        precioEntrada: 0,
-        sl: 0,
-        tp: 0,
-        motivo: 'Swings 4H insuficientes'
-    };
-}
+        const puntoA = estructura4H.piso;
+        const puntoB = estructura4H.techo;
+
+        if (puntoA === Infinity || puntoB === 0 || puntoB <= puntoA) {
+            return { accion: 'NINGUNA', precioEntrada: 0, sl: 0, tp: 0, motivo: 'Swings 4H no delimitados' };
+        }
+
+        const distanciaTotal = puntoB - puntoA;
+        const v1 = velas15m[len - 4];
+        const v2 = velas15m[len - 3];
+        const v3 = velas15m[len - 2];
+        const vActual = velas15m[len - 1];
 
         if (estructura4H.sesgo === 'ALCISTA') {
+            const fibo618 = puntoB - (distanciaTotal * 0.618);
+            const fibo786 = puntoB - (distanciaTotal * 0.786);
 
-    const distanciaTotal = puntoB - puntoA;
+            const enZonaOTE = precioActual <= fibo618 && precioActual >= fibo786;
+            const gapAlcista = v3.low - v1.high;
+            const tieneFVG = (gapAlcista / precioActual) > 0.0003;
+            const rechazoVela = vActual.close > vActual.open && vActual.close > v3.high;
 
-    if (distanciaTotal <= 0) {
-        return {
-            accion: 'NINGUNA',
-            precioEntrada: 0,
-            sl: 0,
-            tp: 0,
-            motivo: 'Estructura inválida'
-        };
-    }
+            if (enZonaOTE && (tieneFVG || rechazoVela)) {
+                const sl = Math.min(v1.low, fibo786) - (precioActual * 0.001);
+                const riesgo = precioActual - sl;
 
-    const fibo618 = puntoB - (distanciaTotal * 0.618);
-    const fibo786 = puntoB - (distanciaTotal * 0.786);
-
-    if (precioActual <= fibo618 && precioActual >= fibo786) {
-
-        const v1 = velas15m[len - 4];
-        const v2 = velas15m[len - 3];
-        const v3 = velas15m[len - 2];
-
-        const tamañoFVG = v3.low - v1.high;
-        const porcentajeFVG =
-    tamañoFVG / precioActual;
-
-        const maximoReciente = Math.max(
-    ...velas15m
-        .slice(len - 10, len - 1)
-        .map(v => v.high)
-);
-
-        if (
-            
-    porcentajeFVG > 0.0005 &&
-            v2.close > v2.open &&
-            velas15m[len - 1].close > maximoReciente
-        ) {
-
-           const sl =
-    Math.min(v1.low, fibo786) - 50;
-
-            const riesgo = precioActual - sl;
-
-            if (riesgo <= 0) {
-                return {
-                    accion: 'NINGUNA',
-                    precioEntrada: 0,
-                    sl: 0,
-                    tp: 0,
-                    motivo: 'Riesgo inválido'
-                };
-            }
-
-            return {
-                accion: 'LONG',
-                precioEntrada: precioActual,
-                sl,
-                tp: precioActual + (riesgo * rr),
-                motivo: 'OTE + FVG válido + BOS Alcista'
-            };
-        }
-    }
-
-    return {
-        accion: 'NINGUNA',
-        precioEntrada: 0,
-        sl: 0,
-        tp: 0,
-        motivo: 'Fuera de zona OTE Alcista'
-    };
-}
-
-        if (estructura4H.sesgo === 'BAJISTA') {
-
-    const distanciaTotal = puntoB - puntoA;
-
-    if (distanciaTotal <= 0) {
-        return {
-            accion: 'NINGUNA',
-            precioEntrada: 0,
-            sl: 0,
-            tp: 0,
-            motivo: 'Estructura inválida'
-        };
-    }
-
-    const fibo618 = puntoA + (distanciaTotal * 0.618);
-    const fibo786 = puntoA + (distanciaTotal * 0.786);
-
-    if (precioActual >= fibo618 && precioActual <= fibo786) {
-
-        const v1 = velas15m[len - 4];
-        const v2 = velas15m[len - 3];
-        const v3 = velas15m[len - 2];
-
-        const tamañoFVG = v1.low - v3.high;
-
-        const minimoReciente = Math.min(
-    ...velas15m
-        .slice(len - 10, len - 1)
-        .map(v => v.low)
-);
-
-        if (
-            tamañoFVG > 20 &&
-            v2.close < v2.open &&
-            velas15m[len - 1].close < minimoReciente
-        ) {
-
-            const sl =
-    Math.max(v1.high, fibo786) + 50;
-
-            const riesgo = sl - precioActual;
-
-            if (riesgo <= 0) {
-                return {
-                    accion: 'NINGUNA',
-                    precioEntrada: 0,
-                    sl: 0,
-                    tp: 0,
-                    motivo: 'Riesgo inválido'
-                };
-            }
-
-            return {
-                accion: 'SHORT',
-                precioEntrada: precioActual,
-                sl,
-                tp: precioActual - (riesgo * rr),
-                motivo: 'OTE + FVG válido + BOS Bajista'
-            };
-        }
-    }
-
-    return {
-        accion: 'NINGUNA',
-        precioEntrada: 0,
-        sl: 0,
-        tp: 0,
-        motivo: 'Fuera de zona OTE Bajista'
-    };
-}
-        if (estructura4H.sesgo === 'RANGO') {
-            const zonaSoporteSms = estructura4H.piso * 1.002;
-            const zonaResistenciaSms = estructura4H.techo * 0.998;
-
-            if (precioActual <= zonaSoporteSms) {
-    const v1 = velas15m[len - 4];
-    const v2 = velas15m[len - 3];
-    const v3 = velas15m[len - 2];
-
-    if (
-        v3.low > v1.high &&
-        v2.close > v2.open
-    ) {
-                    const sl = estructura4H.piso * 0.995;
+                if (riesgo > 0) {
                     return {
                         accion: 'LONG',
                         precioEntrada: precioActual,
-                        sl,
-                        tp: estructura4H.techo,
-                        motivo: 'Compra institucional en soporte de rango lateral 4H'
+                        sl: Number(sl.toFixed(2)),
+                        tp: Number((precioActual + (riesgo * rr)).toFixed(2)),
+                        motivo: 'OTE Alcista (61.8-78.6) + Confirmación de Gatillo'
+                    };
+                }
+            }
+            return { accion: 'NINGUNA', precioEntrada: 0, sl: 0, tp: 0, motivo: 'Condición Alcista no completada' };
+        }
+
+        if (estructura4H.sesgo === 'BAJISTA') {
+            const fibo618 = puntoA + (distanciaTotal * 0.618);
+            const fibo786 = puntoA + (distanciaTotal * 0.786);
+
+            const enZonaOTE = precioActual >= fibo618 && precioActual <= fibo786;
+            const gapBajista = v1.low - v3.high;
+            const tieneFVG = (gapBajista / precioActual) > 0.0003;
+            const rechazoVela = vActual.close < vActual.open && vActual.close < v3.low;
+
+            if (enZonaOTE && (tieneFVG || rechazoVela)) {
+                const sl = Math.max(v1.high, fibo786) + (precioActual * 0.001);
+                const riesgo = sl - precioActual;
+
+                if (riesgo > 0) {
+                    return {
+                        accion: 'SHORT',
+                        precioEntrada: precioActual,
+                        sl: Number(sl.toFixed(2)),
+                        tp: Number((precioActual - (riesgo * rr)).toFixed(2)),
+                        motivo: 'OTE Bajista (61.8-78.6) + Confirmación de Gatillo'
+                    };
+                }
+            }
+            return { accion: 'NINGUNA', precioEntrada: 0, sl: 0, tp: 0, motivo: 'Condición Bajista no completada' };
+        }
+
+        if (estructura4H.sesgo === 'RANGO') {
+            const zonaSoporte = puntoA * 1.003;
+            const zonaResistencia = puntoB * 0.997;
+
+            if (precioActual <= zonaSoporte && vActual.close > vActual.open) {
+                const sl = puntoA * 0.997;
+                const riesgo = precioActual - sl;
+                const beneficio = puntoB - precioActual;
+
+                if (riesgo > 0 && (beneficio / riesgo) >= rr) {
+                    return {
+                        accion: 'LONG',
+                        precioEntrada: precioActual,
+                        sl: Number(sl.toFixed(2)),
+                        tp: Number(puntoB.toFixed(2)),
+                        motivo: 'Rebote en soporte de rango 4H con R:R válido'
                     };
                 }
             }
 
-            if (precioActual >= zonaResistenciaSms) {
+            if (precioActual >= zonaResistencia && vActual.close < vActual.open) {
+                const sl = puntoB * 1.003;
+                const riesgo = sl - precioActual;
+                const beneficio = precioActual - puntoA;
 
-    const v1 = velas15m[len - 4];
-    const v2 = velas15m[len - 3];
-    const v3 = velas15m[len - 2];
-
-    if (
-        v3.high < v1.low &&
-        v2.close < v2.open
-    ) {
-                    const sl = estructura4H.techo * 1.005;
+                if (riesgo > 0 && (beneficio / riesgo) >= rr) {
                     return {
                         accion: 'SHORT',
                         precioEntrada: precioActual,
-                        sl,
-                        tp: estructura4H.piso,
-                        motivo: 'Venta institucional en resistencia de rango lateral 4H'
+                        sl: Number(sl.toFixed(2)),
+                        tp: Number(puntoA.toFixed(2)),
+                        motivo: 'Rechazo en resistencia de rango 4H con R:R válido'
                     };
                 }
             }
         }
 
-        return { accion: 'NINGUNA', precioEntrada: 0, sl: 0, tp: 0, motivo: 'Mercado consolidando sin gatillo claro' };
+        return { accion: 'NINGUNA', precioEntrada: 0, sl: 0, tp: 0, motivo: 'Mercado sin confluencia técnica' };
     }
 }
